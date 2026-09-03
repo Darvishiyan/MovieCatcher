@@ -1,0 +1,32 @@
+# Runtime configuration and credentials
+.env
+.env.*
+!.env.example
+config.json
+*.session
+*.session-journal
+
+# Runtime data and downloads
+data/
+downloads/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+
+# IDEs and local tooling
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json
+
+# Tests and static analysis
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

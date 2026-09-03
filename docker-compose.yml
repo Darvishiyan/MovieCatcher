@@ -1,0 +1,28 @@
+services:
+  moviecatcher:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: moviecatcher:local
+    restart: unless-stopped
+    init: true
+    user: "${PUID:-1000}:${PGID:-1000}"
+    environment:
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:?Set TELEGRAM_BOT_TOKEN}"
+      TELEGRAM_API_ID: "${TELEGRAM_API_ID:?Set TELEGRAM_API_ID}"
+      TELEGRAM_API_HASH: "${TELEGRAM_API_HASH:?Set TELEGRAM_API_HASH}"
+      ALLOWED_USER_IDS: "${ALLOWED_USER_IDS:-}"
+      ALLOWED_CHAT_IDS: "${ALLOWED_CHAT_IDS:-}"
+      DOWNLOAD_ROOT: "${DOWNLOAD_ROOT:?Set DOWNLOAD_ROOT}"
+      SESSION_DIR: /data
+      MAX_FILE_SIZE_GB: "${MAX_FILE_SIZE_GB:-10}"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    volumes:
+      - type: bind
+        source: "${DOWNLOAD_PATH:-./downloads}"
+        target: "${DOWNLOAD_ROOT:?Set DOWNLOAD_ROOT}"
+      - type: bind
+        source: "${SESSION_PATH:-./data}"
+        target: /data
+    security_opt:
+      - no-new-privileges:true
