@@ -110,6 +110,8 @@ when downloading several episodes into the same series directory.
 ## Queue behavior
 
 - The queue is global and FIFO: only one file downloads at a time.
+- A queue notice is removed as soon as its first download status is successfully
+  posted, so stale **Queued** messages do not remain in the chat.
 - Folder selection remains responsive while the worker downloads another file.
 - Every selection and queued/active download includes a **Cancel** button.
 - A queued media group can be cancelled as one batch; once a file starts, its status

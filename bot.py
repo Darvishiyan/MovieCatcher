@@ -126,6 +126,7 @@ class QueuedDownload:
     chat_id: int
     owner_user_id: int | None
     batch_id: str | None = None
+    queue_message_id: int | None = None
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event)
     state: str = "queued"
 
@@ -278,6 +279,35 @@ def _cancel_batch_keyboard(batch_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+async def _delete_queue_message(
+    application: Application,
+    item: QueuedDownload,
+) -> None:
+    """Remove a stale queue notice once its download status is visible."""
+
+    message_id = item.queue_message_id
+    if message_id is None:
+        return
+
+    # Every item in a media batch shares one queue notice. Clear the shared
+    # reference first so later items do not try to delete the same message.
+    downloads: dict[str, QueuedDownload] = application.bot_data.get("downloads", {})
+    for download in downloads.values():
+        if (
+            download.chat_id == item.chat_id
+            and download.queue_message_id == message_id
+        ):
+            download.queue_message_id = None
+
+    try:
+        await application.bot.delete_message(
+            chat_id=item.chat_id,
+            message_id=message_id,
+        )
+    except Exception as exc:
+        logger.debug("Could not delete queue status message: %s", exc)
 
 
 def _display_path(current_dir: Path) -> str:
@@ -602,6 +632,7 @@ async def _process_queued_download(
         parse_mode="HTML",
         reply_markup=_cancel_download_keyboard(item.job_id),
     )
+    await _delete_queue_message(application, item)
 
     client = application.bot_data.get("pyrogram_client")
     if client is None:
@@ -833,6 +864,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             chat_id=update.effective_chat.id,
             owner_user_id=owner_user_id,
             batch_id=batch_id,
+            queue_message_id=(
+                query.message.message_id if query.message is not None else None
+            ),
         )
         for pending_file in pending_files
     ]

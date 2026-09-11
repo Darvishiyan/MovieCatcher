@@ -79,12 +79,19 @@ class FakeBot:
     def __init__(self):
         self.sent = []
         self.status_messages = []
+        self.deleted = []
+        self.actions = []
 
     async def send_message(self, **kwargs):
+        self.actions.append("send")
         self.sent.append(kwargs)
         status = FakeStatusMessage()
         self.status_messages.append(status)
         return status
+
+    async def delete_message(self, **kwargs):
+        self.actions.append("delete")
+        self.deleted.append(kwargs)
 
 
 class FakeApplication:
@@ -383,11 +390,15 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_successful_download_reports_text_progress_and_completion(self):
         item = make_job()
+        item.queue_message_id = 77
         client = SuccessfulClient()
         fake_bot = FakeBot()
         application = SimpleNamespace(
             bot=fake_bot,
-            bot_data={"pyrogram_client": client},
+            bot_data={
+                "pyrogram_client": client,
+                "downloads": {item.job_id: item},
+            },
         )
 
         await bot._process_queued_download(application, item)
@@ -398,6 +409,28 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("100%" in text for text, _ in status_edits))
         self.assertIn("Done", status_edits[-1][0])
         self.assertNotIn("█", "".join(text for text, _ in status_edits))
+        self.assertEqual(fake_bot.actions[:2], ["send", "delete"])
+        self.assertEqual(fake_bot.deleted[0]["message_id"], 77)
+        self.assertIsNone(item.queue_message_id)
+
+    async def test_batch_queue_notice_is_deleted_only_once(self):
+        first = make_job("first.mkv")
+        second = make_job("second.mkv")
+        second.job_id = "job456"
+        first.queue_message_id = 88
+        second.queue_message_id = 88
+        fake_bot = FakeBot()
+        application = SimpleNamespace(
+            bot=fake_bot,
+            bot_data={"downloads": {first.job_id: first, second.job_id: second}},
+        )
+
+        await bot._delete_queue_message(application, first)
+        await bot._delete_queue_message(application, second)
+
+        self.assertEqual(len(fake_bot.deleted), 1)
+        self.assertIsNone(first.queue_message_id)
+        self.assertIsNone(second.queue_message_id)
 
     async def test_worker_processes_queue_in_fifo_order(self):
         queue = asyncio.Queue()
