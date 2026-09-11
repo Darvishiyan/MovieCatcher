@@ -113,6 +113,17 @@ class Settings:
         )
 
 
+@dataclass(frozen=True)
+class QueuedDownload:
+    """A Telegram file waiting for the single download worker."""
+
+    file_id: str
+    file_name: str
+    file_size: int
+    destination_dir: Path
+    chat_id: int
+
+
 try:
     SETTINGS = Settings.from_environment()
 except ConfigurationError as exc:
@@ -130,6 +141,13 @@ SETTINGS.download_root.mkdir(parents=True, exist_ok=True)
 SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
 
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
+PENDING_DOWNLOAD_KEYS = (
+    "file_id",
+    "file_name",
+    "file_size",
+    "current_dir",
+    "state",
+)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -169,6 +187,22 @@ def _safe_file_name(file_name: str, fallback: str) -> str:
     return normalized if normalized not in {"", ".", ".."} else fallback
 
 
+def _initial_directory(user_data: dict[str, Any]) -> Path:
+    """Return the user's last valid destination, falling back to the root."""
+
+    last_dir = Path(user_data.get("last_dir", SETTINGS.download_root)).resolve()
+    if not _is_within_download_root(last_dir) or not last_dir.is_dir():
+        return SETTINGS.download_root
+    return last_dir
+
+
+def _clear_pending_download(user_data: dict[str, Any]) -> None:
+    """Clear folder-selection state without forgetting the last destination."""
+
+    for key in PENDING_DOWNLOAD_KEYS:
+        user_data.pop(key, None)
+
+
 def _keyboard(current_dir: Path) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     if current_dir != SETTINGS.download_root:
@@ -196,11 +230,6 @@ def _directory_text(current_dir: Path) -> str:
     return f"📂 <code>{display_path}</code>\n\nNavigate or download here:"
 
 
-def _progress_bar(percent: float, width: int = 20) -> str:
-    filled = min(width, max(0, int(width * percent / 100)))
-    return "█" * filled + "░" * (width - filled)
-
-
 async def _reject_unauthorized(update: Update) -> bool:
     if _is_authorized(update):
         return False
@@ -221,7 +250,13 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
 
     message = update.message
-    if message is None or context.user_data.get("state") == "waiting_folder":
+    if message is None:
+        return
+
+    if context.user_data.get("state") in {"browsing", "waiting_folder"}:
+        await message.reply_text(
+            "Please finish choosing a folder for the previous file first."
+        )
         return
 
     attachment = (
@@ -255,21 +290,22 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         )
         return
 
+    initial_dir = _initial_directory(context.user_data)
     context.user_data.update(
         {
             "file_id": file_id,
             "file_name": file_name,
             "file_size": file_size,
-            "current_dir": SETTINGS.download_root,
+            "current_dir": initial_dir,
             "state": "browsing",
         }
     )
 
     await message.reply_text(
         f"Received: <b>{html.escape(file_name)}</b>\n\n"
-        f"{_directory_text(SETTINGS.download_root)}",
+        f"{_directory_text(initial_dir)}",
         parse_mode="HTML",
-        reply_markup=_keyboard(SETTINGS.download_root),
+        reply_markup=_keyboard(initial_dir),
     )
 
 
@@ -316,13 +352,14 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
+
 async def _download_telegram_media(
-    info: dict[str, Any],
+    item: QueuedDownload,
     destination: Path,
     status_message: Any,
     client: PyrogramClient,
 ) -> Path:
-    known_total = int(info.get("file_size", 0))
+    known_total = item.file_size
     last_update_time = [time.monotonic()]
     last_update_bytes = [0]
 
@@ -344,21 +381,120 @@ async def _download_telegram_media(
         last_update_bytes[0] = current
         try:
             await status_message.edit_text(
-                f"<b>{html.escape(info['file_name'])}</b>\n\n"
-                f"{_progress_bar(percent)}\n"
+                f"⬇️ <b>{html.escape(item.file_name)}</b>\n\n"
                 f"{percent:.0f}%  •  {current / 1024 / 1024:.1f} / "
                 f"{total / 1024 / 1024:.1f} MB  •  {speed:.1f} MB/s",
                 parse_mode="HTML",
             )
         except Exception as exc:
-            logger.debug("Progress update was skipped: %s", exc)
+            logger.debug("Text progress update was skipped: %s", exc)
 
     result = await client.download_media(
-        info["file_id"], file_name=str(destination), progress=on_progress
+        item.file_id,
+        file_name=str(destination),
+        progress=on_progress,
     )
     if not result:
         raise RuntimeError("Telegram returned no downloaded file")
     return Path(result)
+
+
+async def _process_queued_download(
+    application: Application,
+    item: QueuedDownload,
+) -> None:
+    """Download one queued item and report its lifecycle in Telegram."""
+
+    current_dir = item.destination_dir.resolve()
+    if not _is_within_download_root(current_dir):
+        logger.error("Rejected queued path outside download root: %s", current_dir)
+        await application.bot.send_message(
+            chat_id=item.chat_id,
+            text="❌ The queued destination is no longer valid.",
+        )
+        return
+
+    try:
+        current_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        logger.exception("Could not prepare queued directory: %s", current_dir)
+        await application.bot.send_message(
+            chat_id=item.chat_id,
+            text="❌ Could not prepare that folder. Check container permissions.",
+        )
+        return
+
+    destination = current_dir / item.file_name
+    display_destination = html.escape(_display_path(destination))
+    if destination.exists():
+        await application.bot.send_message(
+            chat_id=item.chat_id,
+            text=(
+                "⚠️ Already exists, skipped.\n\n"
+                f"<code>{display_destination}</code>"
+            ),
+            parse_mode="HTML",
+        )
+        return
+
+    status_message = await application.bot.send_message(
+        chat_id=item.chat_id,
+        text=(
+            f"⬇️ Download started: <b>{html.escape(item.file_name)}</b>\n\n"
+            f"Destination: <code>{html.escape(_display_path(current_dir))}</code>"
+        ),
+        parse_mode="HTML",
+    )
+
+    client = application.bot_data.get("pyrogram_client")
+    if not isinstance(client, PyrogramClient):
+        raise RuntimeError("Telegram download client is unavailable")
+
+    try:
+        downloaded_path = await _download_telegram_media(
+            item,
+            destination,
+            status_message,
+            client,
+        )
+        logger.info("Download complete: %s", downloaded_path)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.exception("Download failed")
+        error_message = html.escape(str(exc)[:3500])
+        await status_message.edit_text(
+            text=f"❌ Download failed: {error_message}",
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        display_path = _display_path(downloaded_path.resolve())
+    except ValueError:
+        display_path = _display_path(current_dir)
+    await status_message.edit_text(
+        text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>",
+        parse_mode="HTML",
+    )
+
+
+async def _download_worker(application: Application) -> None:
+    """Process the global FIFO queue one file at a time."""
+
+    queue: asyncio.Queue[QueuedDownload] = application.bot_data["download_queue"]
+    while True:
+        item = await queue.get()
+        application.bot_data["download_active"] = True
+        try:
+            await _process_queued_download(application, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected error while processing queued download")
+        finally:
+            application.bot_data["download_active"] = False
+            queue.task_done()
 
 
 async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -377,7 +513,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     current_dir = Path(context.user_data["current_dir"]).resolve()
     if not _is_within_download_root(current_dir):
         logger.error("Rejected stored path outside download root: %s", current_dir)
-        context.user_data.clear()
+        _clear_pending_download(context.user_data)
         await query.edit_message_text("Invalid destination. Please send the item again.")
         return
 
@@ -427,57 +563,34 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Unknown action. Please send the item again.")
         return
 
-    info = dict(context.user_data)
-    context.user_data.clear()
-    try:
-        current_dir.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        logger.exception("Could not prepare download directory: %s", current_dir)
-        await query.edit_message_text(
-            "Could not prepare that folder. Check container permissions."
-        )
+    if update.effective_chat is None:
+        _clear_pending_download(context.user_data)
+        await query.edit_message_text("Could not determine the destination chat.")
         return
 
-    destination = current_dir / info["file_name"]
-    if destination.exists():
-        await query.edit_message_text(
-            f"⚠️ Already exists, skipped.\n\n"
-            f"<code>{html.escape(_display_path(destination))}</code>",
-            parse_mode="HTML",
-        )
-        return
-    status_text = f"<b>{html.escape(info['file_name'])}</b>\n\n0%  •  0.0 MB/s"
+    item = QueuedDownload(
+        file_id=context.user_data["file_id"],
+        file_name=context.user_data["file_name"],
+        file_size=context.user_data["file_size"],
+        destination_dir=current_dir,
+        chat_id=update.effective_chat.id,
+    )
+    queue: asyncio.Queue[QueuedDownload] = context.bot_data["download_queue"]
+    items_ahead = queue.qsize() + int(bool(context.bot_data["download_active"]))
 
-    await query.message.delete()
-    status_message = await query.message.reply_text(status_text, parse_mode="HTML")
-
-    try:
-        client = context.bot_data.get("pyrogram_client")
-        if not isinstance(client, PyrogramClient):
-            raise RuntimeError("Telegram download client is unavailable")
-        downloaded_path = await _download_telegram_media(
-            info, destination, status_message, client
-        )
-        logger.info("Download complete: %s", downloaded_path)
-    except Exception as exc:
-        logger.exception("Download failed")
-        error_message = html.escape(str(exc)[:3500])
-        try:
-            await status_message.edit_text(
-                f"❌ Download failed: {error_message}", parse_mode="HTML"
-            )
-        except Exception:
-            logger.exception("Could not update the failure status message")
-        return
-
-    try:
-        display_path = _display_path(downloaded_path.resolve())
-    except ValueError:
-        display_path = _display_path(current_dir)
-    await status_message.edit_text(
-        f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>",
+    if items_ahead:
+        queue_text = f"{items_ahead} download(s) ahead of this file."
+    else:
+        queue_text = "It will start shortly."
+    await query.edit_message_text(
+        f"🕓 Queued: <b>{html.escape(item.file_name)}</b>\n\n"
+        f"Folder: <code>{html.escape(_display_path(current_dir))}</code>\n"
+        f"{queue_text}",
         parse_mode="HTML",
     )
+    await queue.put(item)
+    context.user_data["last_dir"] = current_dir
+    _clear_pending_download(context.user_data)
 
 
 async def main() -> None:
@@ -502,6 +615,8 @@ async def main() -> None:
     try:
         application = Application.builder().token(SETTINGS.bot_token).build()
         application.bot_data["pyrogram_client"] = pyrogram_client
+        application.bot_data["download_queue"] = asyncio.Queue()
+        application.bot_data["download_active"] = False
         attachment_filter = (
             filters.Document.ALL
             | filters.VIDEO
@@ -522,6 +637,10 @@ async def main() -> None:
             if application.updater is None:
                 raise RuntimeError("Telegram updater is unavailable")
             updater_started = False
+            worker_task = asyncio.create_task(
+                _download_worker(application),
+                name="moviecatcher-download-worker",
+            )
             try:
                 await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
                 updater_started = True
@@ -530,6 +649,8 @@ async def main() -> None:
             finally:
                 if updater_started:
                     await application.updater.stop()
+                worker_task.cancel()
+                await asyncio.gather(worker_task, return_exceptions=True)
                 await application.stop()
     finally:
         await pyrogram_client.stop()

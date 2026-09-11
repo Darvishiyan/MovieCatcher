@@ -14,9 +14,12 @@ the bot through Telegram.
 
 - Downloads Telegram documents, videos, audio, animations, voice messages, video
   notes, and photos.
+- Queues confirmed downloads and processes them one at a time in FIFO order.
 - Provides an inline folder browser before each download.
+- Opens the folder browser at each user's most recently selected destination.
 - Creates destination folders directly from Telegram.
-- Shows progress and transfer speed for Telegram file downloads.
+- Shows percentage, transferred size, and speed as concise text without a graphical
+  progress bar.
 - Supports large Telegram downloads through Pyrogram/MTProto.
 - Restricts access with allowlisted Telegram user IDs and/or chat IDs.
 - Prevents destination navigation outside the configured download root.
@@ -33,7 +36,13 @@ Telegram file attachment
 MovieCatcher bot -- access allowlist
         |
         v
-Pyrogram/MTProto download
+Folder selection (last destination is remembered)
+        |
+        v
+Single FIFO download queue
+        |
+        v
+Pyrogram/MTProto download worker
         |
         v
 Selected directory under DOWNLOAD_ROOT
@@ -84,6 +93,22 @@ docker compose up -d --build
 Then send the bot a file or attachment. Select an existing folder—or create a new
 one—and press **Download here**. For uncommon file types, send the item as a Telegram
 document to preserve its original name and extension.
+
+You can send another file while a download is running. MovieCatcher immediately lets
+you choose its destination, adds it to the queue, and starts it after earlier items
+finish. The next folder browser opens at your last selected folder, which is useful
+when downloading several episodes into the same series directory.
+
+## Queue behavior
+
+- The queue is global and FIFO: only one file downloads at a time.
+- Folder selection remains responsive while the worker downloads another file.
+- Each user has an independent last-folder preference.
+- The graphical progress bar is intentionally omitted; percentage, transferred
+  size, speed, and lifecycle status remain available as text.
+- The queue and last-folder preferences are held in memory. Restarting or redeploying
+  the container clears waiting items and resets last-folder preferences; completed
+  files remain on the mounted host directory.
 
 ## Environment variables
 
