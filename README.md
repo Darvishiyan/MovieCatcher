@@ -14,6 +14,8 @@ the bot through Telegram.
 
 - Downloads Telegram documents, videos, audio, animations, voice messages, video
   notes, and photos.
+- Collects Telegram media groups, asks for one destination, and queues every file in
+  the batch in its original order.
 - Queues confirmed downloads and processes them one at a time in FIFO order.
 - Cancels a file during folder selection, while queued, or during an active transfer.
 - Provides an inline folder browser before each download.
@@ -95,6 +97,11 @@ Then send the bot a file or attachment. Select an existing folder—or create a 
 one—and press **Download here**. For uncommon file types, send the item as a Telegram
 document to preserve its original name and extension.
 
+When multiple files are sent together as a Telegram album/media group, MovieCatcher
+waits briefly for the complete group and displays one folder browser. The selected
+destination applies to every file, and the files enter the download queue in their
+Telegram order.
+
 You can send another file while a download is running. MovieCatcher immediately lets
 you choose its destination, adds it to the queue, and starts it after earlier items
 finish. The next folder browser opens at your last selected folder, which is useful
@@ -105,6 +112,8 @@ when downloading several episodes into the same series directory.
 - The queue is global and FIFO: only one file downloads at a time.
 - Folder selection remains responsive while the worker downloads another file.
 - Every selection and queued/active download includes a **Cancel** button.
+- A queued media group can be cancelled as one batch; once a file starts, its status
+  message also provides an individual cancel button.
 - Cancelling an active transfer asks Pyrogram to stop at the next progress callback;
   Pyrogram removes its partial temporary file.
 - Each user has an independent last-folder preference.
@@ -123,8 +132,9 @@ Telegram or download real files:
 python -m unittest discover -s tests -v
 ```
 
-It covers folder-listing regression protection, selection cancellation, queued and
-active-download cancellation, text progress, successful completion, and FIFO order.
+It covers folder-listing regression protection, single and grouped file intake,
+shared batch destinations, selection/batch/active-download cancellation, text
+progress, successful completion, and FIFO order.
 
 ## Environment variables
 

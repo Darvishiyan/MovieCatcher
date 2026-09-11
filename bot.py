@@ -125,8 +125,18 @@ class QueuedDownload:
     destination_dir: Path
     chat_id: int
     owner_user_id: int | None
+    batch_id: str | None = None
     cancel_requested: asyncio.Event = field(default_factory=asyncio.Event)
     state: str = "queued"
+
+
+@dataclass(frozen=True)
+class PendingFile:
+    """A received Telegram attachment waiting for destination selection."""
+
+    file_id: str
+    file_name: str
+    file_size: int
 
 
 class DownloadCancelled(RuntimeError):
@@ -150,10 +160,14 @@ SETTINGS.download_root.mkdir(parents=True, exist_ok=True)
 SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
 
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
+MEDIA_GROUP_SETTLE_SECONDS = 1.0
 PENDING_DOWNLOAD_KEYS = (
     "file_id",
     "file_name",
     "file_size",
+    "pending_files",
+    "media_group_id",
+    "media_group_task",
     "current_dir",
     "state",
 )
@@ -196,6 +210,13 @@ def _safe_file_name(file_name: str, fallback: str) -> str:
     return normalized if normalized not in {"", ".", ".."} else fallback
 
 
+def _short_file_name(file_name: str, limit: int = 100) -> str:
+    if len(file_name) <= limit:
+        return file_name
+    side_length = (limit - 1) // 2
+    return f"{file_name[:side_length]}…{file_name[-side_length:]}"
+
+
 def _initial_directory(user_data: dict[str, Any]) -> Path:
     """Return the user's last valid destination, falling back to the root."""
 
@@ -208,6 +229,14 @@ def _initial_directory(user_data: dict[str, Any]) -> Path:
 def _clear_pending_download(user_data: dict[str, Any]) -> None:
     """Clear folder-selection state without forgetting the last destination."""
 
+    media_group_task = user_data.get("media_group_task")
+    if isinstance(media_group_task, asyncio.Task):
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            current_task = None
+        if media_group_task is not current_task and not media_group_task.done():
+            media_group_task.cancel()
     for key in PENDING_DOWNLOAD_KEYS:
         user_data.pop(key, None)
 
@@ -238,6 +267,19 @@ def _cancel_download_keyboard(job_id: str) -> InlineKeyboardMarkup:
     )
 
 
+def _cancel_batch_keyboard(batch_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "❌ Cancel batch",
+                    callback_data=f"cancel_batch:{batch_id}",
+                )
+            ]
+        ]
+    )
+
+
 def _display_path(current_dir: Path) -> str:
     relative_path = current_dir.relative_to(SETTINGS.download_root)
     return "/" if relative_path == Path(".") else f"/{relative_path.as_posix()}"
@@ -263,20 +305,7 @@ async def _reject_unauthorized(update: Update) -> bool:
     return True
 
 
-async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if await _reject_unauthorized(update):
-        return
-
-    message = update.message
-    if message is None:
-        return
-
-    if context.user_data.get("state") in {"browsing", "waiting_folder"}:
-        await message.reply_text(
-            "Please finish choosing a folder for the previous file first."
-        )
-        return
-
+def _pending_file_from_message(message: Any) -> PendingFile | None:
     attachment = (
         message.document
         or message.video
@@ -287,44 +316,139 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         or (message.photo[-1] if message.photo else None)
     )
     if attachment is None:
-        return
+        return None
 
-    file_id = attachment.file_id
     extension = (
         mimetypes.guess_extension(getattr(attachment, "mime_type", "") or "") or ""
     )
     fallback = f"file_{attachment.file_unique_id}{extension}"
-    file_name = _safe_file_name(
-        getattr(attachment, "file_name", None) or fallback, fallback
+    return PendingFile(
+        file_id=attachment.file_id,
+        file_name=_safe_file_name(
+            getattr(attachment, "file_name", None) or fallback,
+            fallback,
+        ),
+        file_size=getattr(attachment, "file_size", 0) or 0,
     )
-    file_size = getattr(attachment, "file_size", 0) or 0
 
-    if file_size > SETTINGS.max_file_size_bytes:
-        limit_gb = SETTINGS.max_file_size_bytes / 1024**3
-        size_gb = file_size / 1024**3
-        await message.reply_text(
-            f"File too large: <b>{size_gb:.2f} GB</b> (limit is {limit_gb:g} GB).",
-            parse_mode="HTML",
-        )
+
+async def _present_pending_files(message: Any, context: Any) -> None:
+    pending_files: list[PendingFile] = context.user_data.get("pending_files", [])
+    if not pending_files:
         return
 
     initial_dir = _initial_directory(context.user_data)
     context.user_data.update(
         {
-            "file_id": file_id,
-            "file_name": file_name,
-            "file_size": file_size,
             "current_dir": initial_dir,
             "state": "browsing",
         }
     )
+    context.user_data.pop("media_group_task", None)
+
+    if len(pending_files) == 1:
+        heading = f"Received: <b>{html.escape(pending_files[0].file_name)}</b>"
+    else:
+        file_list = "\n".join(
+            f"• <code>{html.escape(_short_file_name(item.file_name))}</code>"
+            for item in pending_files
+        )
+        total_size = sum(item.file_size for item in pending_files)
+        heading = (
+            f"Received <b>{len(pending_files)} files</b>:\n{file_list}\n\n"
+            f"Total size: <b>{total_size / 1024 / 1024:.1f} MB</b>\n"
+            "Choose one destination for the entire batch."
+        )
 
     await message.reply_text(
-        f"Received: <b>{html.escape(file_name)}</b>\n\n"
-        f"{_directory_text(initial_dir)}",
+        f"{heading}\n\n{_directory_text(initial_dir)}",
         parse_mode="HTML",
         reply_markup=_keyboard(initial_dir),
     )
+
+
+async def _present_media_group_after_delay(
+    message: Any,
+    context: Any,
+    media_group_id: str,
+) -> None:
+    try:
+        await asyncio.sleep(MEDIA_GROUP_SETTLE_SECONDS)
+    except asyncio.CancelledError:
+        return
+    if (
+        context.user_data.get("state") == "collecting"
+        and context.user_data.get("media_group_id") == media_group_id
+    ):
+        await _present_pending_files(message, context)
+
+
+def _schedule_media_group_prompt(
+    message: Any,
+    context: Any,
+    media_group_id: str,
+) -> None:
+    previous_task = context.user_data.get("media_group_task")
+    if isinstance(previous_task, asyncio.Task) and not previous_task.done():
+        previous_task.cancel()
+    context.user_data["media_group_task"] = context.application.create_task(
+        _present_media_group_after_delay(message, context, media_group_id)
+    )
+
+
+async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if await _reject_unauthorized(update):
+        return
+
+    message = update.message
+    if message is None:
+        return
+
+    pending_file = _pending_file_from_message(message)
+    if pending_file is None:
+        return
+
+    if pending_file.file_size > SETTINGS.max_file_size_bytes:
+        limit_gb = SETTINGS.max_file_size_bytes / 1024**3
+        size_gb = pending_file.file_size / 1024**3
+        await message.reply_text(
+            f"File too large: <b>{html.escape(pending_file.file_name)}</b> "
+            f"is {size_gb:.2f} GB (limit is {limit_gb:g} GB).",
+            parse_mode="HTML",
+        )
+        return
+
+    media_group_id = getattr(message, "media_group_id", None)
+    state = context.user_data.get("state")
+    active_media_group_id = context.user_data.get("media_group_id")
+
+    if (
+        media_group_id is not None
+        and state == "collecting"
+        and active_media_group_id == media_group_id
+    ):
+        context.user_data["pending_files"].append(pending_file)
+        _schedule_media_group_prompt(message, context, media_group_id)
+        return
+
+    if state in {"collecting", "browsing", "waiting_folder"}:
+        await message.reply_text(
+            "Please finish or cancel the previous folder selection first."
+        )
+        return
+
+    context.user_data["pending_files"] = [pending_file]
+    if media_group_id is None:
+        await _present_pending_files(message, context)
+        return
+
+    context.user_data.update(
+        {
+            "media_group_id": media_group_id,
+            "state": "collecting",
+        }
+    )
+    _schedule_media_group_prompt(message, context, media_group_id)
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -551,6 +675,45 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     action = query.data or ""
 
+    if action.startswith("cancel_batch:"):
+        batch_id = action.removeprefix("cancel_batch:")
+        downloads: dict[str, QueuedDownload] = context.bot_data["downloads"]
+        items = [
+            item for item in downloads.values() if item.batch_id == batch_id
+        ]
+        if not items:
+            await query.answer("This batch has already finished.", show_alert=True)
+            return
+
+        effective_user_id = (
+            update.effective_user.id if update.effective_user is not None else None
+        )
+        if any(
+            item.owner_user_id is not None
+            and item.owner_user_id != effective_user_id
+            for item in items
+        ):
+            await query.answer("Only the sender can cancel this batch.", show_alert=True)
+            return
+
+        await query.answer()
+        active_count = 0
+        for item in items:
+            item.cancel_requested.set()
+            if item.state == "queued":
+                item.state = "cancelled"
+            elif item.state == "downloading":
+                active_count += 1
+        if active_count:
+            message = (
+                f"⏳ Cancelling batch of <b>{len(items)} files</b>…\n"
+                "The active transfer will stop at its next progress update."
+            )
+        else:
+            message = f"❌ Cancelled batch of <b>{len(items)} files</b>."
+        await query.edit_message_text(message, parse_mode="HTML")
+        return
+
     if action.startswith("cancel:"):
         job_id = action.removeprefix("cancel:")
         downloads: dict[str, QueuedDownload] = context.bot_data["downloads"]
@@ -647,35 +810,54 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Could not determine the destination chat.")
         return
 
-    job_id = uuid.uuid4().hex[:16]
-    item = QueuedDownload(
-        job_id=job_id,
-        file_id=context.user_data["file_id"],
-        file_name=context.user_data["file_name"],
-        file_size=context.user_data["file_size"],
-        destination_dir=current_dir,
-        chat_id=update.effective_chat.id,
-        owner_user_id=(
-            update.effective_user.id if update.effective_user is not None else None
-        ),
-    )
+    pending_files: list[PendingFile] = context.user_data.get("pending_files", [])
+    if not pending_files:
+        _clear_pending_download(context.user_data)
+        await query.edit_message_text("No files are waiting for download.")
+        return
+
     queue: asyncio.Queue[QueuedDownload] = context.bot_data["download_queue"]
     downloads: dict[str, QueuedDownload] = context.bot_data["downloads"]
     items_ahead = queue.qsize() + int(bool(context.bot_data["download_active"]))
+    owner_user_id = (
+        update.effective_user.id if update.effective_user is not None else None
+    )
+    batch_id = uuid.uuid4().hex[:16] if len(pending_files) > 1 else None
+    items = [
+        QueuedDownload(
+            job_id=uuid.uuid4().hex[:16],
+            file_id=pending_file.file_id,
+            file_name=pending_file.file_name,
+            file_size=pending_file.file_size,
+            destination_dir=current_dir,
+            chat_id=update.effective_chat.id,
+            owner_user_id=owner_user_id,
+            batch_id=batch_id,
+        )
+        for pending_file in pending_files
+    ]
 
     if items_ahead:
-        queue_text = f"{items_ahead} download(s) ahead of this file."
+        subject = "batch" if len(items) > 1 else "file"
+        queue_text = f"{items_ahead} download(s) ahead of this {subject}."
     else:
         queue_text = "It will start shortly."
+    if len(items) == 1:
+        queue_heading = f"🕓 Queued: <b>{html.escape(items[0].file_name)}</b>"
+        queue_markup = _cancel_download_keyboard(items[0].job_id)
+    else:
+        queue_heading = f"🕓 Queued batch: <b>{len(items)} files</b>"
+        queue_markup = _cancel_batch_keyboard(batch_id or "")
     await query.edit_message_text(
-        f"🕓 Queued: <b>{html.escape(item.file_name)}</b>\n\n"
+        f"{queue_heading}\n\n"
         f"Folder: <code>{html.escape(_display_path(current_dir))}</code>\n"
         f"{queue_text}",
         parse_mode="HTML",
-        reply_markup=_cancel_download_keyboard(job_id),
+        reply_markup=queue_markup,
     )
-    downloads[job_id] = item
-    await queue.put(item)
+    for item in items:
+        downloads[item.job_id] = item
+        await queue.put(item)
     context.user_data["last_dir"] = current_dir
     _clear_pending_download(context.user_data)
 

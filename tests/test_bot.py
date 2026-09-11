@@ -25,9 +25,19 @@ os.environ.update(
 import bot
 
 
+class FakeAttachment:
+    def __init__(self, file_id, file_name, file_size=100):
+        self.file_id = file_id
+        self.file_unique_id = f"unique-{file_id}"
+        self.file_name = file_name
+        self.file_size = file_size
+        self.mime_type = "application/octet-stream"
+
+
 class FakeMessage:
-    def __init__(self, attachment=None, message_id=50):
+    def __init__(self, attachment=None, message_id=50, media_group_id=None):
         self.message_id = message_id
+        self.media_group_id = media_group_id
         self.document = attachment
         self.video = None
         self.audio = None
@@ -77,6 +87,16 @@ class FakeBot:
         return status
 
 
+class FakeApplication:
+    def __init__(self):
+        self.tasks = []
+
+    def create_task(self, coroutine):
+        task = asyncio.create_task(coroutine)
+        self.tasks.append(task)
+        return task
+
+
 class SuccessfulClient:
     def __init__(self):
         self.stop_called = False
@@ -123,8 +143,12 @@ def make_update(*, message=None, query=None, user_id=100, chat_id=200):
     )
 
 
-def make_context(*, user_data=None, bot_data=None):
-    return SimpleNamespace(user_data=user_data or {}, bot_data=bot_data or {})
+def make_context(*, user_data=None, bot_data=None, application=None):
+    return SimpleNamespace(
+        user_data=user_data if user_data is not None else {},
+        bot_data=bot_data if bot_data is not None else {},
+        application=application or FakeApplication(),
+    )
 
 
 def make_job(name="episode.mkv"):
@@ -165,9 +189,7 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         query = FakeQuery("cancel_selection")
         user_data = {
             "state": "browsing",
-            "file_id": "file-id",
-            "file_name": "episode.mkv",
-            "file_size": 100,
+            "pending_files": [bot.PendingFile("file-id", "episode.mkv", 100)],
             "current_dir": DOWNLOAD_ROOT,
             "last_dir": DOWNLOAD_ROOT,
         }
@@ -182,9 +204,7 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         query = FakeQuery("nf")
         user_data = {
             "state": "browsing",
-            "file_id": "file-id",
-            "file_name": "episode.mkv",
-            "file_size": 100,
+            "pending_files": [bot.PendingFile("file-id", "episode.mkv", 100)],
             "current_dir": DOWNLOAD_ROOT,
         }
         context = make_context(user_data=user_data, bot_data={"downloads": {}})
@@ -200,9 +220,7 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         downloads = {}
         user_data = {
             "state": "browsing",
-            "file_id": "file-id",
-            "file_name": "episode.mkv",
-            "file_size": 100,
+            "pending_files": [bot.PendingFile("file-id", "episode.mkv", 100)],
             "current_dir": DOWNLOAD_ROOT,
         }
         context = make_context(
@@ -225,6 +243,105 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
             markup.inline_keyboard[0][0].callback_data,
             f"cancel:{item.job_id}",
         )
+
+    async def test_media_group_gets_one_folder_prompt_for_all_files(self):
+        application = FakeApplication()
+        context = make_context(application=application)
+        first_message = FakeMessage(
+            FakeAttachment("file-1", "episode-1.mkv"),
+            message_id=1,
+            media_group_id="album-1",
+        )
+        second_message = FakeMessage(
+            FakeAttachment("file-2", "episode-2.mkv"),
+            message_id=2,
+            media_group_id="album-1",
+        )
+
+        with patch.object(bot, "MEDIA_GROUP_SETTLE_SECONDS", 0.01):
+            await bot.handle_media(make_update(message=first_message), context)
+            await bot.handle_media(make_update(message=second_message), context)
+            await asyncio.sleep(0.03)
+
+        self.assertEqual(context.user_data["state"], "browsing")
+        self.assertEqual(
+            [item.file_name for item in context.user_data["pending_files"]],
+            ["episode-1.mkv", "episode-2.mkv"],
+        )
+        all_replies = first_message.replies + second_message.replies
+        self.assertEqual(len(all_replies), 1)
+        self.assertIn("Received <b>2 files</b>", all_replies[0][0])
+        self.assertIn("one destination for the entire batch", all_replies[0][0])
+
+    async def test_single_file_still_gets_immediate_folder_prompt(self):
+        message = FakeMessage(FakeAttachment("file-1", "movie.mkv"))
+        context = make_context()
+
+        await bot.handle_media(make_update(message=message), context)
+
+        self.assertEqual(context.user_data["state"], "browsing")
+        self.assertEqual(len(context.user_data["pending_files"]), 1)
+        self.assertEqual(len(message.replies), 1)
+        self.assertIn("movie.mkv", message.replies[0][0])
+
+    async def test_media_group_is_queued_in_order_for_one_destination(self):
+        query = FakeQuery("dl")
+        queue = asyncio.Queue()
+        downloads = {}
+        user_data = {
+            "state": "browsing",
+            "pending_files": [
+                bot.PendingFile("file-1", "episode-1.mkv", 100),
+                bot.PendingFile("file-2", "episode-2.mkv", 200),
+            ],
+            "current_dir": DOWNLOAD_ROOT,
+        }
+        context = make_context(
+            user_data=user_data,
+            bot_data={
+                "download_queue": queue,
+                "downloads": downloads,
+                "download_active": False,
+            },
+        )
+
+        await bot.handle_callback(make_update(query=query), context)
+
+        first = queue.get_nowait()
+        second = queue.get_nowait()
+        queue.task_done()
+        queue.task_done()
+        self.assertEqual(
+            [first.file_name, second.file_name],
+            ["episode-1.mkv", "episode-2.mkv"],
+        )
+        self.assertEqual(first.destination_dir, second.destination_dir)
+        self.assertIsNotNone(first.batch_id)
+        self.assertEqual(first.batch_id, second.batch_id)
+        callback = (
+            query.edits[-1][1]["reply_markup"].inline_keyboard[0][0].callback_data
+        )
+        self.assertEqual(callback, f"cancel_batch:{first.batch_id}")
+
+    async def test_entire_queued_batch_can_be_cancelled(self):
+        first = make_job("episode-1.mkv")
+        second = make_job("episode-2.mkv")
+        first.batch_id = "batch-1"
+        second.batch_id = "batch-1"
+        second.job_id = "job456"
+        first.state = "downloading"
+        query = FakeQuery("cancel_batch:batch-1")
+        context = make_context(
+            bot_data={"downloads": {first.job_id: first, second.job_id: second}}
+        )
+
+        await bot.handle_callback(make_update(query=query), context)
+
+        self.assertTrue(first.cancel_requested.is_set())
+        self.assertTrue(second.cancel_requested.is_set())
+        self.assertEqual(first.state, "downloading")
+        self.assertEqual(second.state, "cancelled")
+        self.assertIn("Cancelling batch", query.edits[-1][0])
 
     async def test_queued_download_can_be_cancelled(self):
         item = make_job()
