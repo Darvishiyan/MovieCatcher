@@ -15,6 +15,7 @@ the bot through Telegram.
 - Downloads Telegram documents, videos, audio, animations, voice messages, video
   notes, and photos.
 - Queues confirmed downloads and processes them one at a time in FIFO order.
+- Cancels a file during folder selection, while queued, or during an active transfer.
 - Provides an inline folder browser before each download.
 - Opens the folder browser at each user's most recently selected destination.
 - Creates destination folders directly from Telegram.
@@ -103,12 +104,27 @@ when downloading several episodes into the same series directory.
 
 - The queue is global and FIFO: only one file downloads at a time.
 - Folder selection remains responsive while the worker downloads another file.
+- Every selection and queued/active download includes a **Cancel** button.
+- Cancelling an active transfer asks Pyrogram to stop at the next progress callback;
+  Pyrogram removes its partial temporary file.
 - Each user has an independent last-folder preference.
 - The graphical progress bar is intentionally omitted; percentage, transferred
   size, speed, and lifecycle status remain available as text.
 - The queue and last-folder preferences are held in memory. Restarting or redeploying
   the container clears waiting items and resets last-folder preferences; completed
   files remain on the mounted host directory.
+
+## Tests
+
+The test suite uses Python's standard-library test runner and does not contact
+Telegram or download real files:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+It covers folder-listing regression protection, selection cancellation, queued and
+active-download cancellation, text progress, successful completion, and FIFO order.
 
 ## Environment variables
 

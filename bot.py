@@ -9,7 +9,8 @@ import mimetypes
 import os
 import signal
 import time
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -113,15 +114,23 @@ class Settings:
         )
 
 
-@dataclass(frozen=True)
+@dataclass
 class QueuedDownload:
     """A Telegram file waiting for the single download worker."""
 
+    job_id: str
     file_id: str
     file_name: str
     file_size: int
     destination_dir: Path
     chat_id: int
+    owner_user_id: int | None
+    cancel_requested: asyncio.Event = field(default_factory=asyncio.Event)
+    state: str = "queued"
+
+
+class DownloadCancelled(RuntimeError):
+    """Raised when a user deliberately cancels a Telegram download."""
 
 
 try:
@@ -217,7 +226,16 @@ def _keyboard(current_dir: Path) -> InlineKeyboardMarkup:
             InlineKeyboardButton("📁+ New folder", callback_data="nf"),
         ]
     )
+    buttons.append(
+        [InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")]
+    )
     return InlineKeyboardMarkup(buttons)
+
+
+def _cancel_download_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel download", callback_data=f"cancel:{job_id}")]]
+    )
 
 
 def _display_path(current_dir: Path) -> str:
@@ -364,6 +382,11 @@ async def _download_telegram_media(
     last_update_bytes = [0]
 
     async def on_progress(current: int, total: int) -> None:
+        if item.cancel_requested.is_set():
+            # Pyrogram requires stop_transmission() to be called from its
+            # progress callback. It then removes the partial .temp file.
+            client.stop_transmission()
+
         total = total or known_total
         if not total:
             return
@@ -385,6 +408,7 @@ async def _download_telegram_media(
                 f"{percent:.0f}%  •  {current / 1024 / 1024:.1f} / "
                 f"{total / 1024 / 1024:.1f} MB  •  {speed:.1f} MB/s",
                 parse_mode="HTML",
+                reply_markup=_cancel_download_keyboard(item.job_id),
             )
         except Exception as exc:
             logger.debug("Text progress update was skipped: %s", exc)
@@ -395,6 +419,8 @@ async def _download_telegram_media(
         progress=on_progress,
     )
     if not result:
+        if item.cancel_requested.is_set():
+            raise DownloadCancelled
         raise RuntimeError("Telegram returned no downloaded file")
     return Path(result)
 
@@ -404,6 +430,10 @@ async def _process_queued_download(
     item: QueuedDownload,
 ) -> None:
     """Download one queued item and report its lifecycle in Telegram."""
+
+    if item.cancel_requested.is_set():
+        item.state = "cancelled"
+        return
 
     current_dir = item.destination_dir.resolve()
     if not _is_within_download_root(current_dir):
@@ -427,6 +457,7 @@ async def _process_queued_download(
     destination = current_dir / item.file_name
     display_destination = html.escape(_display_path(destination))
     if destination.exists():
+        item.state = "skipped"
         await application.bot.send_message(
             chat_id=item.chat_id,
             text=(
@@ -437,6 +468,7 @@ async def _process_queued_download(
         )
         return
 
+    item.state = "downloading"
     status_message = await application.bot.send_message(
         chat_id=item.chat_id,
         text=(
@@ -444,10 +476,11 @@ async def _process_queued_download(
             f"Destination: <code>{html.escape(_display_path(current_dir))}</code>"
         ),
         parse_mode="HTML",
+        reply_markup=_cancel_download_keyboard(item.job_id),
     )
 
     client = application.bot_data.get("pyrogram_client")
-    if not isinstance(client, PyrogramClient):
+    if client is None:
         raise RuntimeError("Telegram download client is unavailable")
 
     try:
@@ -460,7 +493,16 @@ async def _process_queued_download(
         logger.info("Download complete: %s", downloaded_path)
     except asyncio.CancelledError:
         raise
+    except DownloadCancelled:
+        item.state = "cancelled"
+        logger.info("Download cancelled: %s", destination)
+        await status_message.edit_text(
+            text=f"❌ Cancelled: <b>{html.escape(item.file_name)}</b>",
+            parse_mode="HTML",
+        )
+        return
     except Exception as exc:
+        item.state = "failed"
         logger.exception("Download failed")
         error_message = html.escape(str(exc)[:3500])
         await status_message.edit_text(
@@ -473,6 +515,7 @@ async def _process_queued_download(
         display_path = _display_path(downloaded_path.resolve())
     except ValueError:
         display_path = _display_path(current_dir)
+    item.state = "completed"
     await status_message.edit_text(
         text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>",
         parse_mode="HTML",
@@ -483,6 +526,7 @@ async def _download_worker(application: Application) -> None:
     """Process the global FIFO queue one file at a time."""
 
     queue: asyncio.Queue[QueuedDownload] = application.bot_data["download_queue"]
+    downloads: dict[str, QueuedDownload] = application.bot_data["downloads"]
     while True:
         item = await queue.get()
         application.bot_data["download_active"] = True
@@ -494,6 +538,7 @@ async def _download_worker(application: Application) -> None:
             logger.exception("Unexpected error while processing queued download")
         finally:
             application.bot_data["download_active"] = False
+            downloads.pop(item.job_id, None)
             queue.task_done()
 
 
@@ -504,7 +549,39 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     if query is None:
         return
+    action = query.data or ""
+
+    if action.startswith("cancel:"):
+        job_id = action.removeprefix("cancel:")
+        downloads: dict[str, QueuedDownload] = context.bot_data["downloads"]
+        item = downloads.get(job_id)
+        if item is None:
+            await query.answer("This download has already finished.", show_alert=True)
+            return
+
+        effective_user_id = (
+            update.effective_user.id if update.effective_user is not None else None
+        )
+        if item.owner_user_id is not None and item.owner_user_id != effective_user_id:
+            await query.answer("Only the sender can cancel this download.", show_alert=True)
+            return
+
+        await query.answer()
+        item.cancel_requested.set()
+        if item.state == "queued":
+            item.state = "cancelled"
+            message = f"❌ Cancelled: <b>{html.escape(item.file_name)}</b>"
+        else:
+            message = f"⏳ Cancelling: <b>{html.escape(item.file_name)}</b>…"
+        await query.edit_message_text(message, parse_mode="HTML")
+        return
+
     await query.answer()
+
+    if action == "cancel_selection":
+        _clear_pending_download(context.user_data)
+        await query.edit_message_text("❌ File selection cancelled.")
+        return
 
     if not context.user_data.get("state"):
         await query.edit_message_text("Session expired. Please send the file again.")
@@ -517,7 +594,6 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Invalid destination. Please send the item again.")
         return
 
-    action = query.data or ""
     if action == "up":
         if current_dir != SETTINGS.download_root:
             current_dir = current_dir.parent
@@ -556,6 +632,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             f"📂 <code>{html.escape(_display_path(current_dir))}</code>\n\n"
             "Type the new folder name:",
             parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")]]
+            ),
         )
         return
 
@@ -568,14 +647,20 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.edit_message_text("Could not determine the destination chat.")
         return
 
+    job_id = uuid.uuid4().hex[:16]
     item = QueuedDownload(
+        job_id=job_id,
         file_id=context.user_data["file_id"],
         file_name=context.user_data["file_name"],
         file_size=context.user_data["file_size"],
         destination_dir=current_dir,
         chat_id=update.effective_chat.id,
+        owner_user_id=(
+            update.effective_user.id if update.effective_user is not None else None
+        ),
     )
     queue: asyncio.Queue[QueuedDownload] = context.bot_data["download_queue"]
+    downloads: dict[str, QueuedDownload] = context.bot_data["downloads"]
     items_ahead = queue.qsize() + int(bool(context.bot_data["download_active"]))
 
     if items_ahead:
@@ -587,7 +672,9 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"Folder: <code>{html.escape(_display_path(current_dir))}</code>\n"
         f"{queue_text}",
         parse_mode="HTML",
+        reply_markup=_cancel_download_keyboard(job_id),
     )
+    downloads[job_id] = item
     await queue.put(item)
     context.user_data["last_dir"] = current_dir
     _clear_pending_download(context.user_data)
@@ -616,6 +703,7 @@ async def main() -> None:
         application = Application.builder().token(SETTINGS.bot_token).build()
         application.bot_data["pyrogram_client"] = pyrogram_client
         application.bot_data["download_queue"] = asyncio.Queue()
+        application.bot_data["downloads"] = {}
         application.bot_data["download_active"] = False
         attachment_filter = (
             filters.Document.ALL
