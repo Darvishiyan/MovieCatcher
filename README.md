@@ -102,6 +102,12 @@ waits briefly for the complete group and displays one folder browser. The select
 destination applies to every file, and the files enter the download queue in their
 Telegram order.
 
+Some Telegram clients send a multi-video selection as separate messages without a
+media-group identifier. MovieCatcher also handles this case: while a folder browser
+is still open, newly received files are added to that pending batch and the same
+folder prompt is updated. Pressing **Download here** closes the batch and queues all
+of its files for the selected destination.
+
 You can send another file while a download is running. MovieCatcher immediately lets
 you choose its destination, adds it to the queue, and starts it after earlier items
 finish. The next folder browser opens at your last selected folder, which is useful

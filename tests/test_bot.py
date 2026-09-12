@@ -37,6 +37,7 @@ class FakeAttachment:
 class FakeMessage:
     def __init__(self, attachment=None, message_id=50, media_group_id=None):
         self.message_id = message_id
+        self.chat_id = 200
         self.media_group_id = media_group_id
         self.document = attachment
         self.video = None
@@ -50,7 +51,7 @@ class FakeMessage:
 
     async def reply_text(self, text, **kwargs):
         self.replies.append((text, kwargs))
-        return SimpleNamespace(message_id=len(self.replies) + 100)
+        return SimpleNamespace(message_id=len(self.replies) + 100, chat_id=self.chat_id)
 
 
 class FakeQuery:
@@ -80,6 +81,7 @@ class FakeBot:
         self.sent = []
         self.status_messages = []
         self.deleted = []
+        self.message_edits = []
         self.actions = []
 
     async def send_message(self, **kwargs):
@@ -92,6 +94,9 @@ class FakeBot:
     async def delete_message(self, **kwargs):
         self.actions.append("delete")
         self.deleted.append(kwargs)
+
+    async def edit_message_text(self, **kwargs):
+        self.message_edits.append(kwargs)
 
 
 class FakeApplication:
@@ -314,6 +319,39 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(context.user_data["pending_files"]), 1)
         self.assertEqual(len(message.replies), 1)
         self.assertIn("movie.mkv", message.replies[0][0])
+
+    async def test_separate_files_join_open_folder_selection(self):
+        fake_bot = FakeBot()
+        context = make_context(telegram_bot=fake_bot)
+        first_message = FakeMessage(FakeAttachment("file-1", "episode-1.mkv"))
+        second_message = FakeMessage(FakeAttachment("file-2", "episode-2.mkv"))
+
+        await bot.handle_media(make_update(message=first_message), context)
+        await bot.handle_media(make_update(message=second_message), context)
+
+        self.assertEqual(
+            [item.file_name for item in context.user_data["pending_files"]],
+            ["episode-1.mkv", "episode-2.mkv"],
+        )
+        self.assertEqual(len(first_message.replies), 1)
+        self.assertEqual(len(second_message.replies), 0)
+        self.assertEqual(len(fake_bot.message_edits), 1)
+        refreshed = fake_bot.message_edits[0]
+        self.assertEqual(refreshed["message_id"], 101)
+        self.assertIn("Received <b>2 files</b>", refreshed["text"])
+        self.assertIn("episode-1.mkv", refreshed["text"])
+        self.assertIn("episode-2.mkv", refreshed["text"])
+
+    async def test_large_loose_batch_keeps_prompt_within_telegram_limit(self):
+        pending_files = [
+            bot.PendingFile(f"file-{index}", f"episode-{index}-{'x' * 180}.mkv", 100)
+            for index in range(35)
+        ]
+
+        text = bot._pending_files_text(pending_files, bot.SETTINGS.download_root)
+
+        self.assertLess(len(text), 4096)
+        self.assertIn("…and 15 more", text)
 
     async def test_media_group_is_queued_in_order_for_one_destination(self):
         query = FakeQuery("dl")

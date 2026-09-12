@@ -162,6 +162,7 @@ SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
 
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
 MEDIA_GROUP_SETTLE_SECONDS = 1.0
+PENDING_FILE_DISPLAY_LIMIT = 20
 PENDING_DOWNLOAD_KEYS = (
     "file_id",
     "file_name",
@@ -171,6 +172,8 @@ PENDING_DOWNLOAD_KEYS = (
     "media_group_task",
     "current_dir",
     "folder_prompt_message_id",
+    "selection_chat_id",
+    "selection_message_id",
     "state",
 )
 
@@ -375,6 +378,37 @@ def _pending_file_from_message(message: Any) -> PendingFile | None:
     )
 
 
+def _pending_files_heading(pending_files: list[PendingFile]) -> str:
+    if len(pending_files) == 1:
+        return f"Received: <b>{html.escape(pending_files[0].file_name)}</b>"
+
+    displayed_files = pending_files[:PENDING_FILE_DISPLAY_LIMIT]
+    file_list = "\n".join(
+        f"• <code>{html.escape(_short_file_name(item.file_name))}</code>"
+        for item in displayed_files
+    )
+    remaining_count = len(pending_files) - len(displayed_files)
+    if remaining_count:
+        file_list += f"\n• …and {remaining_count} more"
+    total_size = sum(item.file_size for item in pending_files)
+    return (
+        f"Received <b>{len(pending_files)} files</b>:\n{file_list}\n\n"
+        f"Total size: <b>{total_size / 1024 / 1024:.1f} MB</b>\n"
+        "Choose one destination for the entire batch."
+    )
+
+
+def _pending_files_text(
+    pending_files: list[PendingFile],
+    current_dir: Path,
+) -> str:
+    return (
+        f"{_pending_files_heading(pending_files)}\n\n"
+        f"{_directory_text(current_dir)}\n\n"
+        "Any additional files sent before choosing a folder will join this batch."
+    )
+
+
 async def _present_pending_files(message: Any, context: Any) -> None:
     pending_files: list[PendingFile] = context.user_data.get("pending_files", [])
     if not pending_files:
@@ -389,24 +423,49 @@ async def _present_pending_files(message: Any, context: Any) -> None:
     )
     context.user_data.pop("media_group_task", None)
 
-    if len(pending_files) == 1:
-        heading = f"Received: <b>{html.escape(pending_files[0].file_name)}</b>"
-    else:
-        file_list = "\n".join(
-            f"• <code>{html.escape(_short_file_name(item.file_name))}</code>"
-            for item in pending_files
-        )
-        total_size = sum(item.file_size for item in pending_files)
-        heading = (
-            f"Received <b>{len(pending_files)} files</b>:\n{file_list}\n\n"
-            f"Total size: <b>{total_size / 1024 / 1024:.1f} MB</b>\n"
-            "Choose one destination for the entire batch."
-        )
-
-    await message.reply_text(
-        f"{heading}\n\n{_directory_text(initial_dir)}",
+    selection_message = await message.reply_text(
+        _pending_files_text(pending_files, initial_dir),
         parse_mode="HTML",
         reply_markup=_keyboard(initial_dir),
+    )
+    context.user_data["selection_message_id"] = selection_message.message_id
+    context.user_data["selection_chat_id"] = getattr(
+        selection_message,
+        "chat_id",
+        getattr(message, "chat_id", None),
+    )
+
+
+async def _refresh_pending_files(message: Any, context: Any) -> None:
+    """Add loose consecutive files to the currently open folder selection."""
+
+    pending_files: list[PendingFile] = context.user_data["pending_files"]
+    current_dir = Path(context.user_data["current_dir"]).resolve()
+    message_id = context.user_data.get("selection_message_id")
+    chat_id = context.user_data.get("selection_chat_id")
+    if message_id is not None and chat_id is not None:
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=_pending_files_text(pending_files, current_dir),
+                parse_mode="HTML",
+                reply_markup=_keyboard(current_dir),
+            )
+            return
+        except Exception as exc:
+            logger.debug("Could not refresh the pending-file prompt: %s", exc)
+
+    selection_message = await message.reply_text(
+        _pending_files_text(pending_files, current_dir),
+        parse_mode="HTML",
+        reply_markup=_keyboard(current_dir),
+    )
+    context.user_data["selection_message_id"] = selection_message.message_id
+    context.user_data["selection_chat_id"] = getattr(
+        selection_message,
+        "chat_id",
+        getattr(message, "chat_id", None),
     )
 
 
@@ -465,16 +524,19 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     state = context.user_data.get("state")
     active_media_group_id = context.user_data.get("media_group_id")
 
-    if (
-        media_group_id is not None
-        and state == "collecting"
-        and active_media_group_id == media_group_id
+    if state == "collecting" and (
+        media_group_id is None or active_media_group_id == media_group_id
     ):
         context.user_data["pending_files"].append(pending_file)
-        _schedule_media_group_prompt(message, context, media_group_id)
+        _schedule_media_group_prompt(message, context, active_media_group_id)
         return
 
-    if state in {"collecting", "browsing", "waiting_folder"}:
+    if state == "browsing":
+        context.user_data["pending_files"].append(pending_file)
+        await _refresh_pending_files(message, context)
+        return
+
+    if state in {"collecting", "waiting_folder"}:
         await message.reply_text(
             "Please finish or cancel the previous folder selection first."
         )
@@ -534,10 +596,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         context.user_data["current_dir"] = new_dir
         context.user_data["state"] = "browsing"
-        await message.reply_text(
+        selection_message = await message.reply_text(
             f"Created <b>{html.escape(folder_name)}</b>\n\n{_directory_text(new_dir)}",
             parse_mode="HTML",
             reply_markup=_keyboard(new_dir),
+        )
+        context.user_data["selection_message_id"] = selection_message.message_id
+        context.user_data["selection_chat_id"] = getattr(
+            selection_message,
+            "chat_id",
+            getattr(message, "chat_id", None),
         )
         return
 
