@@ -114,6 +114,8 @@ when downloading several episodes into the same series directory.
   posted, so stale **Queued** messages do not remain in the chat.
 - Folder selection remains responsive while the worker downloads another file.
 - Every selection and queued/active download includes a **Cancel** button.
+- The temporary `Type the new folder name` prompt is removed after the folder is
+  created successfully.
 - A queued media group can be cancelled as one batch; once a file starts, its status
   message also provides an individual cancel button.
 - Cancelling an active transfer asks Pyrogram to stop at the next progress callback;

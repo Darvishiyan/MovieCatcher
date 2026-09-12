@@ -170,6 +170,7 @@ PENDING_DOWNLOAD_KEYS = (
     "media_group_id",
     "media_group_task",
     "current_dir",
+    "folder_prompt_message_id",
     "state",
 )
 
@@ -240,6 +241,18 @@ def _clear_pending_download(user_data: dict[str, Any]) -> None:
             media_group_task.cancel()
     for key in PENDING_DOWNLOAD_KEYS:
         user_data.pop(key, None)
+
+
+async def _delete_folder_prompt(context: Any, chat_id: int | None) -> None:
+    """Remove the folder-name prompt after a folder is created successfully."""
+
+    message_id = context.user_data.pop("folder_prompt_message_id", None)
+    if message_id is None or chat_id is None:
+        return
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception as exc:
+        logger.debug("Could not delete folder-name prompt: %s", exc)
 
 
 def _keyboard(current_dir: Path) -> InlineKeyboardMarkup:
@@ -515,6 +528,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
+        await _delete_folder_prompt(
+            context,
+            update.effective_chat.id if update.effective_chat is not None else None,
+        )
         context.user_data["current_dir"] = new_dir
         context.user_data["state"] = "browsing"
         await message.reply_text(
@@ -822,6 +839,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     if action == "nf":
         context.user_data["state"] = "waiting_folder"
+        if query.message is not None:
+            context.user_data["folder_prompt_message_id"] = query.message.message_id
         await query.edit_message_text(
             f"📂 <code>{html.escape(_display_path(current_dir))}</code>\n\n"
             "Type the new folder name:",

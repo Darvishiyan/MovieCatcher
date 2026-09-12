@@ -150,11 +150,12 @@ def make_update(*, message=None, query=None, user_id=100, chat_id=200):
     )
 
 
-def make_context(*, user_data=None, bot_data=None, application=None):
+def make_context(*, user_data=None, bot_data=None, application=None, telegram_bot=None):
     return SimpleNamespace(
         user_data=user_data if user_data is not None else {},
         bot_data=bot_data if bot_data is not None else {},
         application=application or FakeApplication(),
+        bot=telegram_bot or FakeBot(),
     )
 
 
@@ -220,6 +221,29 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
 
         markup = query.edits[-1][1]["reply_markup"]
         self.assertEqual(markup.inline_keyboard[0][0].callback_data, "cancel_selection")
+        self.assertEqual(user_data["folder_prompt_message_id"], 50)
+
+    async def test_folder_name_prompt_is_deleted_after_successful_creation(self):
+        fake_bot = FakeBot()
+        user_data = {
+            "state": "waiting_folder",
+            "pending_files": [bot.PendingFile("file-id", "episode.mkv", 100)],
+            "current_dir": DOWNLOAD_ROOT,
+            "folder_prompt_message_id": 50,
+        }
+        context = make_context(user_data=user_data, telegram_bot=fake_bot)
+        message = FakeMessage(message_id=51)
+        message.text = "Season 01"
+
+        await bot.handle_text(make_update(message=message), context)
+
+        self.assertTrue((DOWNLOAD_ROOT / "Season 01").is_dir())
+        self.assertEqual(
+            fake_bot.deleted,
+            [{"chat_id": 200, "message_id": 50}],
+        )
+        self.assertNotIn("folder_prompt_message_id", user_data)
+        self.assertIn("Created <b>Season 01</b>", message.replies[-1][0])
 
     async def test_confirmed_download_is_queued_with_cancel_button(self):
         query = FakeQuery("dl")
