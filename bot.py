@@ -815,7 +815,6 @@ async def _process_queued_download(
     subtitle_note = {
         "downloaded": "\nEnglish subtitle: downloaded beside the video.",
         "external": "\nEnglish subtitle: already beside the video.",
-        "embedded": "\nEnglish subtitle: already inside the video.",
         "unavailable": "\n⚠️ No reliable English subtitle found. The video is saved unchanged.",
     }.get(subtitle_status, "")
     await status_message.edit_text(

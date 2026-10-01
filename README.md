@@ -46,9 +46,10 @@ backup. A failure leaves that source file intact and continues to the next file.
 ## Automatic English subtitles
 
 Set `ENGLISH_SUBTITLES=true` to have MovieCatcher look for an English subtitle
-after each video download (and after optional Dolby Vision removal). If the video
-already has an English subtitle track or a same-name `.en.srt` file, it leaves
-that subtitle alone. For a successful search it saves
+after each video download (and after optional Dolby Vision removal). If a
+same-name `.en.srt` file already exists, it leaves that subtitle alone. It
+searches even when an embedded subtitle track is labeled English, because source
+files sometimes use the wrong language tag. For a successful search it saves
 `Movie.Name.en.srt` beside `Movie.Name.mkv`, where Jellyfin can find it.
 The original video and its audio tracks are never changed by this step.
 

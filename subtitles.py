@@ -22,7 +22,6 @@ from guessit import guessit
 from dolby_vision import VIDEO_SUFFIXES
 
 logger = logging.getLogger(__name__)
-_ENGLISH = {"en", "eng"}
 _SRT_TIME = re.compile(r"(?m)^\s*(\d{2}):(\d{2}):(\d{2})[,\.]\d{3}\s*-->")
 _SUBDL_API = "https://api.subdl.com/api/v1/subtitles"
 _SUBDL_DOWNLOAD = "https://dl.subdl.com"
@@ -30,18 +29,10 @@ _SUBDL_DOWNLOAD = "https://dl.subdl.com"
 
 def _probe(video: Path) -> dict:
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration:stream=codec_type:stream_tags=language", "-of", "json", str(video)],
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video)],
         capture_output=True, text=True, timeout=30, check=True,
     )
     return json.loads(result.stdout)
-
-
-def _has_english_embedded(info: dict) -> bool:
-    return any(
-        stream.get("codec_type") == "subtitle"
-        and stream.get("tags", {}).get("language", "").lower() in _ENGLISH
-        for stream in info.get("streams", [])
-    )
 
 
 def _valid_srt(path: Path, duration: float | None) -> bool:
@@ -154,7 +145,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
 
 
 def fetch_english_subtitle(video: Path) -> str:
-    """Return downloaded, external, embedded, or unavailable.
+    """Return downloaded, external, or unavailable.
 
     Only a reasonably matched, readable SRT is published; an unmatched video is
     left untouched for a later retry or manual selection.
@@ -166,8 +157,6 @@ def fetch_english_subtitle(video: Path) -> str:
     if sidecar.exists():
         return "external"
     info = _probe(video)
-    if _has_english_embedded(info):
-        return "embedded"
     duration = float(info.get("format", {}).get("duration") or 0) or None
     with tempfile.TemporaryDirectory(prefix=".moviecatcher-subtitles-", dir=video.parent) as temp:
         candidate = Path(temp) / sidecar.name
