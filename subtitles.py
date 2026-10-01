@@ -184,7 +184,10 @@ def fetch_english_subtitle(video: Path) -> str:
             except Exception as exc:
                 # HTTP exceptions can contain the query-string API key.
                 logger.warning("SubDL lookup failed for %s (%s)", video, type(exc).__name__)
-        providers = ("gestdown", "tvsubtitles") if guessit(video.name).get("type") == "episode" else ("bsplayer",)
+        # No unauthenticated movie provider is enabled; movie lookups use SubDL.
+        if guessit(video.name).get("type") != "episode":
+            return "unavailable"
+        providers = ("gestdown", "tvsubtitles")
         command = [sys.executable, "-m", "subliminal", "download", "-l", "en"]
         for provider in providers:
             command.extend(("-p", provider))

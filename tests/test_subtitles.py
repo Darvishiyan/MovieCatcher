@@ -62,6 +62,16 @@ class SubtitleTests(unittest.TestCase):
             self.assertEqual(request.call_count, 2)
             self.assertIn("Line 10", target.read_text(encoding="utf-8"))
 
+    def test_movie_without_subdl_key_does_not_wait_for_episode_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "Interstellar.2014.1080p.BluRay.mkv"
+            video.write_bytes(b"video")
+            with patch.dict(subtitles.os.environ, {"SUBDL_API_KEY": ""}):
+                with patch.object(subtitles, "_probe", return_value={"streams": [], "format": {"duration": "7200"}}):
+                    with patch.object(subtitles.subprocess, "run") as run:
+                        self.assertEqual(subtitles.fetch_english_subtitle(video), "unavailable")
+                        run.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
