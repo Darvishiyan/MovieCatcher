@@ -28,6 +28,7 @@ from telegram.ext import (
 )
 
 from dolby_vision import VIDEO_SUFFIXES, DolbyVisionError, remove_dolby_vision
+from subtitles import fetch_english_subtitle
 
 
 class ConfigurationError(RuntimeError):
@@ -98,6 +99,7 @@ class Settings:
     allowed_chat_ids: frozenset[int]
     log_level: str
     dolby_vision_remove: bool
+    english_subtitles: bool
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -124,6 +126,7 @@ class Settings:
             allowed_chat_ids=allowed_chat_ids,
             log_level=log_level,
             dolby_vision_remove=_boolean_env("DOLBY_VISION_REMOVE"),
+            english_subtitles=_boolean_env("ENGLISH_SUBTITLES"),
         )
 
 
@@ -792,13 +795,31 @@ async def _process_queued_download(
         )
         return
 
+    subtitle_status = None
+    if SETTINGS.english_subtitles and downloaded_path.suffix.lower() in VIDEO_SUFFIXES:
+        try:
+            await status_message.edit_text(
+                text=f"🔎 Looking for English subtitles: <b>{html.escape(item.file_name)}</b>",
+                parse_mode="HTML",
+            )
+            subtitle_status = await asyncio.to_thread(fetch_english_subtitle, downloaded_path)
+        except Exception:
+            logger.exception("English subtitle lookup failed for %s", downloaded_path)
+            subtitle_status = "unavailable"
+
     try:
         display_path = _display_path(downloaded_path.resolve())
     except ValueError:
         display_path = _display_path(current_dir)
     item.state = "completed"
+    subtitle_note = {
+        "downloaded": "\nEnglish subtitle: downloaded beside the video.",
+        "external": "\nEnglish subtitle: already beside the video.",
+        "embedded": "\nEnglish subtitle: already inside the video.",
+        "unavailable": "\n⚠️ No reliable English subtitle found. The video is saved unchanged.",
+    }.get(subtitle_status, "")
     await status_message.edit_text(
-        text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>",
+        text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>{subtitle_note}",
         parse_mode="HTML",
     )
 

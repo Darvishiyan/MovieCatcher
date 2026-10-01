@@ -18,6 +18,8 @@ services:
       MAX_FILE_SIZE_GB: "${MAX_FILE_SIZE_GB:-10}"
       LOG_LEVEL: "${LOG_LEVEL:-INFO}"
       DOLBY_VISION_REMOVE: "${DOLBY_VISION_REMOVE:-false}"
+      ENGLISH_SUBTITLES: "${ENGLISH_SUBTITLES:-false}"
+      SUBDL_API_KEY: "${SUBDL_API_KEY:-}"
     volumes:
       - type: bind
         source: "${DOWNLOAD_PATH:-./downloads}"

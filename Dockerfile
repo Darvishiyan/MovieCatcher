@@ -33,6 +33,7 @@ COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY --chown=moviecatcher:moviecatcher bot.py ./
 COPY --chown=moviecatcher:moviecatcher dolby_vision.py ./
+COPY --chown=moviecatcher:moviecatcher subtitles.py ./
 
 USER moviecatcher
 STOPSIGNAL SIGTERM

@@ -43,6 +43,32 @@ Use `scan` first to review the affected paths. Keep a separate copy yourself if
 you want one before running `remove`; this tool intentionally does not keep a
 backup. A failure leaves that source file intact and continues to the next file.
 
+## Automatic English subtitles
+
+Set `ENGLISH_SUBTITLES=true` to have MovieCatcher look for an English subtitle
+after each video download (and after optional Dolby Vision removal). If the video
+already has an English subtitle track or a same-name `.en.srt` file, it leaves
+that subtitle alone. For a successful search it saves
+`Movie.Name.en.srt` beside `Movie.Name.mkv`, where Jellyfin can find it.
+The original video and its audio tracks are never changed by this step.
+
+Without an account, MovieCatcher searches Gestdown, BSPlayer, and TVSubtitles.
+Coverage varies; no subtitle is published when the search fails or the candidate
+does not pass the release-match and SRT timing checks. Telegram reports the result.
+For broader movie and series coverage, create a personal free key at the
+[SubDL API panel](https://subdl.com/panel/api) and set `SUBDL_API_KEY` in your
+private stack environment. Do not put a key in Git. SubDL results are filtered by
+title, year or episode, release source, and timing before a sidecar is published.
+Neither matching method can guarantee perfect sync; check playback, especially
+for extended or recut editions.
+
+To scan an existing library with the same policy, run this command inside the
+container (repeat it later to retry files without a match):
+
+```bash
+docker compose exec moviecatcher python /app/subtitles.py scan "$DOWNLOAD_ROOT"
+```
+
 ## Features
 
 - Downloads Telegram documents, videos, audio, animations, voice messages, video
@@ -64,6 +90,7 @@ backup. A failure leaves that source file intact and continues to the next file.
 - Persists the Pyrogram session without adding it to the image or Git repository.
 - Optionally removes Dolby Vision metadata locally while preserving HDR10 video,
   audio tracks, and subtitles.
+- Optionally fetches matching English sidecar subtitles for new video downloads.
 
 ## Architecture and how it works
 
@@ -198,6 +225,8 @@ progress, successful completion, and FIFO order.
 | `MAX_FILE_SIZE_GB` | No | `10` | Maximum accepted Telegram file size in GiB. |
 | `LOG_LEVEL` | No | `INFO` | Logging level: `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 | `DOLBY_VISION_REMOVE` | No | `false` | `true` checks common video formats and removes compatible Dolby Vision profile 8 metadata locally before publishing. |
+| `ENGLISH_SUBTITLES` | No | `false` | `true` searches for matching English subtitles after each video download. |
+| `SUBDL_API_KEY` | No | Empty | Personal free SubDL API key for broader subtitle coverage; leave empty for no-account providers. |
 
 Values in `.env.example` are placeholders only. Copy the file to `.env`; never put
 real credentials or private IDs in `.env.example`.
