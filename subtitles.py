@@ -23,6 +23,7 @@ from pathlib import Path
 from guessit import guessit
 
 from dolby_vision import VIDEO_SUFFIXES
+from subtitle_normalize import english_sidecars, english_streams
 
 logger = logging.getLogger(__name__)
 _SRT_TIME = re.compile(r"(?m)^\s*(\d{2}):(\d{2}):(\d{2})[,\.]\d{3}\s*-->")
@@ -75,7 +76,7 @@ def _subdl_open(url: str):
 
 def _probe(video: Path) -> dict:
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(video)],
+        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(video)],
         capture_output=True, text=True, timeout=30, check=True,
     )
     return json.loads(result.stdout)
@@ -136,7 +137,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
     video_info = dict(guessit(video.name))
     parameters = {
         "api_key": api_key, "file_name": video.name, "languages": "EN",
-        "subs_per_page": "30", "releases": "1", "unpack": "1",
+        "subs_per_page": "30", "releases": "1", "unpack": "1", "hi": "1",
         "client": "custom_integration",
     }
     if video_info.get("type") == "episode":
@@ -159,11 +160,19 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
             continue
         files = item.get("unpack_files") or [item]
         for file in files:
-            if file.get("language", "EN").upper() != "EN":
+            language = str(file.get("language", "EN")).upper()
+            if language not in {"EN", "EN-US", "EN_US"}:
                 continue
             release = file.get("release_name") or item.get("release_name") or ""
             score = _release_score(video_info, release, file if file.get("season") else item)
             if score >= (75 if video_info.get("type") == "episode" else 65):
+                label = f"{release} {file.get('name') or item.get('name') or ''}"
+                if language in {"EN-US", "EN_US"} or re.search(r"(?i)\b(?:english\s*\(?us\)?|american|en[-_]us)\b", label):
+                    score += 15
+                if file.get("hi", item.get("hi")) or re.search(r"(?i)\b(?:sdh|hearing.impaired|cc)\b", label):
+                    score -= 10
+                if re.search(r"(?i)\b(?:forced|foreign)\b", label):
+                    score -= 20
                 scored.append((score, file.get("url") or item.get("url"), file.get("name") or item.get("name")))
     for _, subtitle_url, name in sorted(scored, reverse=True)[:3]:
         if not subtitle_url or not subtitle_url.startswith("/subtitle/"):
@@ -191,7 +200,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
 
 
 def fetch_english_subtitle(video: Path) -> str:
-    """Return downloaded, external, rate_limited, or unavailable.
+    """Return downloaded, external, embedded, rate_limited, or unavailable.
 
     Only a reasonably matched, readable SRT is published; an unmatched video is
     left untouched for a later retry or manual selection.
@@ -200,9 +209,11 @@ def fetch_english_subtitle(video: Path) -> str:
     if video.suffix.lower() not in VIDEO_SUFFIXES or video.name.startswith("._"):
         return "unavailable"
     sidecar = video.with_name(f"{video.stem}.en.srt")
-    if sidecar.exists():
+    if english_sidecars(video):
         return "external"
     info = _probe(video)
+    if english_streams(info):
+        return "embedded"
     duration = float(info.get("format", {}).get("duration") or 0) or None
     with tempfile.TemporaryDirectory(prefix=".moviecatcher-subtitles-", dir=video.parent) as temp:
         candidate = Path(temp) / sidecar.name

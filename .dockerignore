@@ -2,4 +2,7 @@
 !bot.py
 !dolby_vision.py
 !subtitles.py
+!subtitle_normalize.py
+!scripts/
+!scripts/subtitle_inventory.py
 !requirements.txt

@@ -46,12 +46,17 @@ backup. A failure leaves that source file intact and continues to the next file.
 ## Automatic English subtitles
 
 Set `ENGLISH_SUBTITLES=true` to have MovieCatcher look for an English subtitle
-after each video download (and after optional Dolby Vision removal). If a
-same-name `.en.srt` file already exists, it leaves that subtitle alone. It
-searches even when an embedded subtitle track is labeled English, because source
-files sometimes use the wrong language tag. For a successful search it saves
+after each video download (and after optional Dolby Vision removal). An existing
+English sidecar or embedded track is reused, so a second English subtitle is not
+downloaded. If a video has multiple English tracks, MovieCatcher keeps one,
+preferring an explicitly labeled US English version and then a standard version
+over SDH or forced. It leaves Persian subtitles intact and removes other
+subtitle languages. When it needs to remove internal subtitle tracks, FFmpeg copies the video
+and audio streams without re-encoding and verifies the result before replacing
+the source. For a successful new search it saves
 `Movie.Name.en.srt` beside `Movie.Name.mkv`, where Jellyfin can find it.
-The original video and its audio tracks are never changed by this step.
+Only unneeded subtitle streams and files are removed by this step; video and
+audio tracks keep their original codecs and languages.
 
 Without an account, MovieCatcher searches Gestdown and TVSubtitles for episodes.
 Movie subtitle lookup needs a SubDL key because the no-account movie source
@@ -64,6 +69,9 @@ private stack environment. Do not put a key in Git. SubDL results are filtered b
 title, year or episode, release source, and timing before a sidecar is published.
 Neither matching method can guarantee perfect sync; check playback, especially
 for extended or recut editions.
+SubDL lists English by language code and may not distinguish US from other
+English releases. MovieCatcher prefers US only when the source metadata says so;
+it does not label an unknown variant as American English.
 
 SubDL's free download allowance can run out even while its search API still
 works. MovieCatcher reports that condition as pending, stops a bulk scan, and
@@ -78,7 +86,21 @@ container (repeat it later to retry files without a match):
 
 ```bash
 docker compose exec moviecatcher python /app/subtitles.py scan "$DOWNLOAD_ROOT"
+docker compose exec moviecatcher python /app/subtitle_normalize.py scan "$DOWNLOAD_ROOT"
+docker compose exec moviecatcher python /app/subtitle_normalize.py normalize "$DOWNLOAD_ROOT"
+docker compose exec moviecatcher python /app/subtitle_inventory.py --output /data/subtitle-inventory.json "$DOWNLOAD_ROOT"
 ```
+
+`subtitle_normalize.py scan` reports videos with multiple English choices or
+other subtitle languages; `normalize` removes the extras after verification.
+Both commands leave Persian subtitle streams and sidecars untouched. Schedule
+`scripts/retry-subtitles.sh` to normalize
+duplicates and retry missing subtitles each day.
+An unlabeled text stream is sampled before removal. If its text clearly uses
+Persian script, its language tag is corrected to Persian while its subtitle
+content is copied unchanged. If an MP4-named source has a SubRip subtitle stream
+that MP4 cannot store, only that subtitle stream is changed to MP4-compatible
+`mov_text`; its video and audio streams are still copied without re-encoding.
 
 The final Telegram download status is edited in place. It reports Dolby Vision
 removal when performed and separately confirms whether an English subtitle was

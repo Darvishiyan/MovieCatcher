@@ -75,27 +75,20 @@ class SubtitleTests(unittest.TestCase):
                         self.assertEqual(subtitles.fetch_english_subtitle(video), "unavailable")
                         run.assert_not_called()
 
-    def test_embedded_english_tag_does_not_skip_external_search(self):
+    def test_existing_embedded_english_does_not_create_duplicate_sidecar(self):
         with tempfile.TemporaryDirectory() as directory:
             video = Path(directory) / "Interstellar.2014.1080p.BluRay.mkv"
             video.write_bytes(b"video")
-
-            def supply_subtitle(_, candidate, __, ___):
-                candidate.write_text("\n\n".join(
-                    f"{number}\n00:{number:02}:00,000 --> 00:{number:02}:02,000\nLine {number}"
-                    for number in range(1, 11)
-                ), encoding="utf-8")
-                return True
 
             with patch.dict(subtitles.os.environ, {"SUBDL_API_KEY": "example-key"}):
                 with patch.object(subtitles, "_probe", return_value={
                     "streams": [{"codec_type": "subtitle", "tags": {"language": "eng"}}],
                     "format": {"duration": "720"},
                 }):
-                    with patch.object(subtitles, "_fetch_subdl", side_effect=supply_subtitle) as fetch:
-                        self.assertEqual(subtitles.fetch_english_subtitle(video), "downloaded")
-                        fetch.assert_called_once()
-            self.assertTrue(video.with_name("Interstellar.2014.1080p.BluRay.en.srt").exists())
+                    with patch.object(subtitles, "_fetch_subdl") as fetch:
+                        self.assertEqual(subtitles.fetch_english_subtitle(video), "embedded")
+                        fetch.assert_not_called()
+            self.assertFalse(video.with_name("Interstellar.2014.1080p.BluRay.en.srt").exists())
 
     def test_subdl_429_is_reported_as_pending_without_leaking_key(self):
         with tempfile.TemporaryDirectory() as directory:

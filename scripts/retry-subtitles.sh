@@ -8,6 +8,20 @@ if [ "$#" -eq 0 ]; then
     exit 2
 fi
 
+write_inventory() {
+    docker exec "$container" python /app/subtitle_inventory.py \
+        --output /data/subtitle-inventory-latest.json "$@" || \
+        echo 'Could not write the latest subtitle inventory.' >&2
+}
+trap 'write_inventory "$@"' EXIT
+
+for library in "$@"; do
+    echo "Reconciling English subtitles in $library at $(date -Is)"
+    if ! docker exec "$container" python /app/subtitle_normalize.py normalize "$library"; then
+        echo "Some subtitle duplicates need manual review in $library; see the persistent error log."
+    fi
+done
+
 for library in "$@"; do
     echo "Scanning $library at $(date -Is)"
     if docker exec "$container" python /app/subtitles.py scan "$library"; then

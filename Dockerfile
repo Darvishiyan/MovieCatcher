@@ -34,6 +34,8 @@ WORKDIR /app
 COPY --chown=moviecatcher:moviecatcher bot.py ./
 COPY --chown=moviecatcher:moviecatcher dolby_vision.py ./
 COPY --chown=moviecatcher:moviecatcher subtitles.py ./
+COPY --chown=moviecatcher:moviecatcher subtitle_normalize.py ./
+COPY --chown=moviecatcher:moviecatcher scripts/subtitle_inventory.py ./subtitle_inventory.py
 
 USER moviecatcher
 STOPSIGNAL SIGTERM

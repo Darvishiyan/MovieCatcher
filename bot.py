@@ -30,6 +30,7 @@ from telegram.ext import (
 )
 
 from dolby_vision import VIDEO_SUFFIXES, DolbyVisionError, remove_dolby_vision
+from subtitle_normalize import normalize_english_subtitles
 from subtitles import _valid_srt, configure_error_log, fetch_english_subtitle
 
 
@@ -891,6 +892,7 @@ async def _process_queued_download(
     subtitle_status = None
     if SETTINGS.english_subtitles and downloaded_path.suffix.lower() in VIDEO_SUFFIXES:
         try:
+            await asyncio.to_thread(normalize_english_subtitles, downloaded_path)
             await status_message.edit_text(
                 text=f"🔎 Looking for English subtitles: <b>{html.escape(item.file_name)}</b>",
                 parse_mode="HTML",
@@ -908,6 +910,7 @@ async def _process_queued_download(
     subtitle_note = {
         "downloaded": "\n✅ English subtitle downloaded and saved beside the video.",
         "external": "\n✅ English subtitle already exists beside the video.",
+        "embedded": "\n✅ One English subtitle already exists inside the video.",
         "rate_limited": "\n⏳ English subtitle pending: SubDL daily limit reached; a later library scan will retry.",
         "unavailable": "\n⚠️ English subtitle not found or failed validation; a later library scan can retry.",
         "error": "\n⚠️ English subtitle lookup failed; see the persistent error log.",

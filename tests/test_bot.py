@@ -505,8 +505,9 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
             bot_data={"pyrogram_client": SuccessfulClient(), "downloads": {item.job_id: item}},
         )
         with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, english_subtitles=True)):
-            with patch.object(bot, "fetch_english_subtitle", return_value="downloaded") as fetch:
-                await bot._process_queued_download(application, item)
+            with patch.object(bot, "normalize_english_subtitles", return_value="unchanged"):
+                with patch.object(bot, "fetch_english_subtitle", return_value="downloaded") as fetch:
+                    await bot._process_queued_download(application, item)
         fetch.assert_called_once_with(DOWNLOAD_ROOT / "episode.mkv")
         self.assertIn("English subtitle downloaded", fake_bot.status_messages[0].edits[-1][0])
 
@@ -519,8 +520,9 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, english_subtitles=True, session_dir=Path(directory))):
-                with patch.object(bot, "fetch_english_subtitle", return_value="rate_limited"):
-                    await bot._process_queued_download(application, item)
+                with patch.object(bot, "normalize_english_subtitles", return_value="unchanged"):
+                    with patch.object(bot, "fetch_english_subtitle", return_value="rate_limited"):
+                        await bot._process_queued_download(application, item)
                 final = fake_bot.status_messages[0].edits[-1][0]
                 self.assertIn("English subtitle pending", final)
                 self.assertNotIn("English subtitle downloaded", final)
