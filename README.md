@@ -1,5 +1,32 @@
 # MovieCatcher
 
+## Optional Windows converter
+
+After a video finishes downloading, the bot writes an atomic job record under
+`SESSION_DIR/converter/queue`. The download remains on the server while the PC is
+off. `pc_worker.py` polls that queue over the existing SSH connection, resumes
+interrupted transfers, runs FFmpeg on the PC, and returns the result. The server
+checks its size and SHA256 before publishing it. For a final replacement, the
+original goes to `DOWNLOAD_PATH/.moviecatcher-originals/` with its folder layout
+preserved. Test jobs keep the original in place and publish a separately named
+file for TV comparison.
+
+Jobs start with profile `pending`, so no automatic quality decision is made.
+`server_ops.py` on the Docker host can set a profile after one is approved. The
+available profiles are `hdr10-copy` (copy 4K video while stripping Dolby Vision
+metadata), `h264-4k-sdr`, `h264-1080p-sdr`, and `passthrough`. `hdr10-basic` is
+an experimental metadata variant. Every profile maps every audio and subtitle
+track; the PC worker checks audio counts and language tags before upload.
+
+Install `server_ops.py` at `/opt/moviecatcher/data/converter/server_ops.py` on
+the Docker host. The Windows PC needs Python 3, FFmpeg/FFprobe, and a working
+`ssh homeserver` alias. Start `python pc_worker.py` at Windows sign in (or use
+`--once` for a single poll). Its working directory defaults to
+`%USERPROFILE%\\MovieCatcherConverter` and can be changed with
+`MOVIECATCHER_WORK`. The PC initiates all connections, so no inbound Windows
+port or fixed PC IP is needed. If the PC is off or SSH fails, jobs remain in
+the server queue and are retried later.
+
 MovieCatcher is a self-hosted Telegram download service designed to complement a
 [Jellyfin](https://jellyfin.org/) media server. Send the bot a file, choose a
 destination folder from Telegram, and MovieCatcher writes the download into a host

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import mimetypes
 import os
@@ -163,6 +164,7 @@ SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
 MEDIA_GROUP_SETTLE_SECONDS = 1.0
 PENDING_FILE_DISPLAY_LIMIT = 20
+CONVERTER_VIDEO_SUFFIXES = frozenset({".mkv", ".mp4", ".m4v", ".mov", ".ts", ".webm"})
 PENDING_DOWNLOAD_KEYS = (
     "file_id",
     "file_name",
@@ -176,6 +178,36 @@ PENDING_DOWNLOAD_KEYS = (
     "selection_message_id",
     "state",
 )
+
+
+def _queue_conversion(downloaded_path: Path) -> None:
+    """Persist a completed video for the separately running PC worker."""
+    path = downloaded_path.resolve()
+    if path.suffix.lower() not in CONVERTER_VIDEO_SUFFIXES:
+        return
+    relative_path = path.relative_to(SETTINGS.download_root)
+    queue_dir = SETTINGS.session_dir / "converter" / "queue"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    job_id = uuid.uuid4().hex
+    record = {
+        "version": 1,
+        "id": job_id,
+        "relative_path": relative_path.as_posix(),
+        "size": path.stat().st_size,
+        "created": time.time(),
+        "profile": "pending",
+    }
+    temporary = queue_dir / f".{job_id}.tmp"
+    ready = queue_dir / f"{job_id}.json"
+    try:
+        with temporary.open("x", encoding="utf-8") as output:
+            json.dump(record, output, ensure_ascii=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, ready)
+    finally:
+        temporary.unlink(missing_ok=True)
+    logger.info("Queued for PC converter: %s", relative_path)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -731,6 +763,10 @@ async def _process_queued_download(
             client,
         )
         logger.info("Download complete: %s", downloaded_path)
+        try:
+            _queue_conversion(downloaded_path)
+        except Exception:
+            logger.exception("Could not enqueue completed video for PC converter")
     except asyncio.CancelledError:
         raise
     except DownloadCancelled:
