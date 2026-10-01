@@ -58,9 +58,14 @@ the source. For a successful new search it saves
 Only unneeded subtitle streams and files are removed by this step; video and
 audio tracks keep their original codecs and languages.
 
-Without an account, MovieCatcher searches Gestdown and TVSubtitles for episodes.
-Movie subtitle lookup needs a SubDL key because the no-account movie source
-tested on this server could not be reached.
+MovieCatcher tries SubDL when its key is configured, then uses the public
+OpenSubtitles provider for movies, cartoons, and episodes. Episodes also try
+Gestdown and TVSubtitles. The public providers require no account in this
+configuration; their availability and download limits can still vary.
+When a public provider's first release is incomplete, MovieCatcher checks up
+to five releases. It verifies language, title and year when available, and
+requires subtitle cues to extend through at least 80% of the video. A few
+out-of-order SRT cues can be sorted without changing their text or timestamps.
 Coverage varies; no subtitle is published when the search fails or the candidate
 does not pass the release-match and SRT timing checks. Telegram reports the result.
 For broader movie and series coverage, create a personal free key at the
@@ -74,10 +79,11 @@ English releases. MovieCatcher prefers US only when the source metadata says so;
 it does not label an unknown variant as American English.
 
 SubDL's free download allowance can run out even while its search API still
-works. MovieCatcher reports that condition as pending, stops a bulk scan, and
-returns exit status `75`. It never reports a subtitle as downloaded unless a
-validated `.en.srt` sidecar was actually saved. Run a later scan after the quota
-resets. The `scripts/retry-subtitles.sh` helper accepts one or more library paths
+works. MovieCatcher tries the public providers for each missing file even when
+SubDL is limited. A bulk scan continues through all files and returns exit
+status `75` if some remain pending due to the SubDL limit. It never reports a
+subtitle as downloaded unless a validated `.en.srt` sidecar was actually saved.
+Run a later scan after the quota resets. The `scripts/retry-subtitles.sh` helper accepts one or more library paths
 inside the container and can be scheduled with cron, for example at 03:15 in
 the server's local timezone after the UTC daily reset.
 

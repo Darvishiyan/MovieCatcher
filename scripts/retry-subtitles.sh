@@ -22,6 +22,7 @@ for library in "$@"; do
     fi
 done
 
+status=0
 for library in "$@"; do
     echo "Scanning $library at $(date -Is)"
     if docker exec "$container" python /app/subtitles.py scan "$library"; then
@@ -30,7 +31,11 @@ for library in "$@"; do
         result=$?
         if [ "$result" -eq 75 ]; then
             echo 'SubDL quota reached; remaining files will be retried on the next scheduled run.'
+            status=75
+            continue
         fi
-        exit "$result"
+        echo "Subtitle scan failed for $library with status $result." >&2
+        status="$result"
     fi
 done
+exit "$status"

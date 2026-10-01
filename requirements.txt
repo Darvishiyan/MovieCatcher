@@ -2,3 +2,4 @@ python-telegram-bot==21.6
 Pyrogram==2.0.106
 TgCrypto==1.2.5
 subliminal==2.7.1
+pysubs2==1.8.1

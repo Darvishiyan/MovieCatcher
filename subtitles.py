@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 import urllib.parse
 import urllib.error
 import urllib.request
@@ -21,9 +22,10 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from guessit import guessit
+import pysubs2
 
 from dolby_vision import VIDEO_SUFFIXES
-from subtitle_normalize import english_sidecars, english_streams
+from subtitle_normalize import _has_persian_script, english_sidecars, english_streams
 
 logger = logging.getLogger(__name__)
 _SRT_TIME = re.compile(r"(?m)^\s*(\d{2}):(\d{2}):(\d{2})[,\.]\d{3}\s*-->")
@@ -89,12 +91,35 @@ def _valid_srt(path: Path, duration: float | None) -> bool:
         content = path.read_text(encoding="utf-8-sig")
     except (UnicodeError, OSError):
         return False
+    if _has_persian_script(content):
+        return False
     times = [int(h) * 3600 + int(m) * 60 + int(s) for h, m, s in _SRT_TIME.findall(content)]
     if len(times) < 10 or times != sorted(times):
         return False
-    if duration and duration > 600 and not 0.55 * duration <= times[-1] <= duration + 120:
+    if duration and duration > 600 and not 0.8 * duration <= times[-1] <= duration + 120:
         return False
     return True
+
+
+def _repair_srt_order(path: Path, duration: float | None) -> bool:
+    """Sort a few misplaced cues without changing their text or timestamps."""
+    try:
+        subs = pysubs2.load(str(path), encoding="utf-8-sig")
+    except Exception:
+        return False
+    inversions = sum(right.start < left.start for left, right in zip(subs.events, subs.events[1:]))
+    if len(subs.events) < 10 or not 0 < inversions <= 5:
+        return False
+    subs.events.sort(key=lambda event: (event.start, event.end))
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.srt")
+    try:
+        subs.save(str(temporary), format_="srt", encoding="utf-8")
+        if not _valid_srt(temporary, duration):
+            return False
+        os.replace(temporary, path)
+        return True
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _normalized(value: object) -> str:
@@ -199,6 +224,54 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
     return False
 
 
+def _fetch_other_providers(video: Path, candidate_path: Path, duration: float | None) -> bool:
+    """Try multiple public releases when SubDL has no valid result."""
+    providers = ["opensubtitles"]
+    video_info = guessit(video.name)
+    if video_info.get("type") == "episode":
+        providers.extend(("gestdown", "tvsubtitles"))
+    ignored_ids: list[str] = []
+    for _ in range(5):
+        candidate_path.unlink(missing_ok=True)
+        command = [sys.executable, "-m", "subliminal", "--debug", "download", "-l", "en"]
+        for provider in providers:
+            command.extend(("-p", provider))
+        command.extend((
+            "-r", "hash", "-r", "metadata", "-m",
+            "60" if video_info.get("year") or video_info.get("type") == "episode" else "80",
+            "-W", "-C", "n,hi",
+            "-F", "srt", "-d", str(candidate_path.parent),
+        ))
+        for subtitle_id in ignored_ids:
+            command.extend(("-I", subtitle_id))
+        command.append(str(video))
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        if result.returncode != 0:
+            logger.warning("Public subtitle provider failed for %s (exit %s)", video, result.returncode)
+            return False
+        log = result.stdout + "\n" + result.stderr
+        ids = re.findall(r"Saving <OpenSubtitlesSubtitle '([^']+)'", log)
+        subtitle_id = ids[-1] if ids else None
+        match_details = re.findall(r"English subtitle from opensubtitles \(match on ([^)]*)\)", log)
+        matches = {part.strip() for part in match_details[-1].split(",")} if match_details else set()
+        valid = _valid_srt(candidate_path, duration)
+        if not valid and candidate_path.is_file():
+            valid = _repair_srt_order(candidate_path, duration)
+        if subtitle_id and video_info.get("year") and not {"title", "year"} <= matches:
+            valid = False
+        if subtitle_id and video_info.get("type") == "episode" and not (
+            {"season", "episode"} <= matches or "hash" in matches
+        ):
+            valid = False
+        if valid:
+            return True
+        if not subtitle_id or subtitle_id in ignored_ids:
+            return False
+        logger.info("Rejected mismatched or incomplete subtitle candidate %s for %s", subtitle_id, video)
+        ignored_ids.append(subtitle_id)
+    return False
+
+
 def fetch_english_subtitle(video: Path) -> str:
     """Return downloaded, external, embedded, rate_limited, or unavailable.
 
@@ -234,17 +307,7 @@ def fetch_english_subtitle(video: Path) -> str:
             except Exception as exc:
                 # HTTP exceptions can contain the query-string API key.
                 logger.warning("SubDL lookup failed for %s (%s)", video, type(exc).__name__)
-        # No unauthenticated movie provider is enabled; movie lookups use SubDL.
-        if guessit(video.name).get("type") != "episode":
-            return "rate_limited" if rate_limited else "unavailable"
-        providers = ("gestdown", "tvsubtitles")
-        command = [sys.executable, "-m", "subliminal", "download", "-l", "en"]
-        for provider in providers:
-            command.extend(("-p", provider))
-        command.extend(("-r", "hash", "-r", "metadata", "-m", "60", "-F", "srt", "-d", temp, str(video)))
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
-        if result.returncode != 0 or not _valid_srt(candidate, duration):
-            logger.warning("English subtitle unavailable for %s: %s", video, (result.stderr or result.stdout)[-600:])
+        if not _fetch_other_providers(video, candidate, duration):
             return "rate_limited" if rate_limited else "unavailable"
         try:
             os.link(candidate, sidecar)
@@ -274,8 +337,6 @@ def main() -> int:
             result = "error"
         counts[result] = counts.get(result, 0) + 1
         print(f"{result}\t{path}", flush=True)
-        if result == "rate_limited" and args.action == "scan":
-            break
     print(f"Summary: {counts}", flush=True)
     return 75 if counts.get("rate_limited", 0) else (1 if counts.get("error", 0) else 0)
 
