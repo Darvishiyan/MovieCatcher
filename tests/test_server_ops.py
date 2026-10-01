@@ -64,6 +64,13 @@ class ServerOperationsTest(unittest.TestCase):
         self.assertEqual((self.media / result["backup"]).read_bytes(), b"original-video")
         self.assertEqual((self.media / result["output"]).read_bytes(), payload)
 
+    def test_full_comparison_keeps_original_and_uses_distinct_name(self):
+        record, payload = self.complete("h264-1080p-sdr", "test-full")
+        result = self.call("complete", record["id"], hashlib.sha256(payload).hexdigest(), str(len(payload)))
+        self.assertEqual(self.source.read_bytes(), b"original-video")
+        self.assertIn(".Full.WebOS-Test.mp4", result["output"])
+        self.assertEqual((self.media / result["output"]).read_bytes(), payload)
+
     def test_bad_hash_does_not_move_original(self):
         record, payload = self.complete("hdr10-copy", "replace")
         with self.assertRaises(ValueError):

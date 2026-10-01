@@ -88,7 +88,7 @@ def run(command: str, arguments: list[str]) -> None:
         job_id = uuid.uuid4().hex
         profile = arguments[1] if len(arguments) > 1 else "pending"
         mode = arguments[2] if len(arguments) > 2 else "replace"
-        if profile not in PROFILES or mode not in {"replace", "test"}:
+        if profile not in PROFILES or mode not in {"replace", "test", "test-full"}:
             raise ValueError("Unsupported profile or mode")
         record = {"version": 1, "id": job_id, "relative_path": relative.as_posix(),
                   "size": source.stat().st_size, "created": time.time(),
@@ -160,6 +160,8 @@ def run(command: str, arguments: list[str]) -> None:
         mode = record.get("mode", "replace")
         if mode == "test":
             destination = source.with_name(f"{source.stem}.{record['profile']}.WebOS-Test.mp4")
+        elif mode == "test-full":
+            destination = source.with_name(f"{source.stem}.{record['profile']}.Full.WebOS-Test.mp4")
         elif mode == "replace":
             destination = source.with_suffix(".mp4")
         else:

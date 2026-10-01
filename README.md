@@ -8,8 +8,8 @@ off. `pc_worker.py` polls that queue over the existing SSH connection, resumes
 interrupted transfers, runs FFmpeg on the PC, and returns the result. The server
 checks its size and SHA256 before publishing it. For a final replacement, the
 original goes to `DOWNLOAD_PATH/.moviecatcher-originals/` with its folder layout
-preserved. Test jobs keep the original in place and publish a separately named
-file for TV comparison.
+preserved. `test` jobs publish short comparison clips, and `test-full` jobs
+publish full episodes with distinct names. Both keep the original in place.
 
 Jobs start with profile `pending`, so no automatic quality decision is made.
 `server_ops.py` on the Docker host can set a profile after one is approved. The
