@@ -52,7 +52,8 @@ that subtitle alone. For a successful search it saves
 `Movie.Name.en.srt` beside `Movie.Name.mkv`, where Jellyfin can find it.
 The original video and its audio tracks are never changed by this step.
 
-Without an account, MovieCatcher searches Gestdown, BSPlayer, and TVSubtitles.
+Without an account, MovieCatcher searches Gestdown and TVSubtitles for episodes,
+and BSPlayer for movies.
 Coverage varies; no subtitle is published when the search fails or the candidate
 does not pass the release-match and SRT timing checks. Telegram reports the result.
 For broader movie and series coverage, create a personal free key at the

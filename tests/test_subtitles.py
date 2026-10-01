@@ -1,5 +1,8 @@
+import io
+import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +34,33 @@ class SubtitleTests(unittest.TestCase):
             with patch.object(subtitles, "_probe") as probe:
                 self.assertEqual(subtitles.fetch_english_subtitle(video), "external")
                 probe.assert_not_called()
+
+    def test_subdl_tries_matching_release_and_validates_archive(self):
+        captions = "\n\n".join(
+            f"{number}\n00:{number:02}:00,000 --> 00:{number:02}:02,000\nLine {number}"
+            for number in range(1, 11)
+        )
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w") as archive:
+            archive.writestr("Silo.S02E07.en.srt", captions)
+        response = {
+            "status": True,
+            "results": [{"name": "Silo", "type": "tv"}],
+            "subtitles": [{
+                "release_name": "Silo.S02E07.2160p.WEB-DL",
+                "season": 2, "episode": 7, "language": "EN",
+                "name": "Silo.zip", "url": "/subtitle/test.zip",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "Silo.S02E07.en.srt"
+            responses = [io.BytesIO(json.dumps(response).encode()), io.BytesIO(archive_buffer.getvalue())]
+            with patch.object(subtitles.urllib.request, "urlopen", side_effect=responses) as request:
+                self.assertTrue(subtitles._fetch_subdl(
+                    Path(directory) / "Silo.S02E07.2160p.WEB-DL.mkv", target, 720, "example-key",
+                ))
+            self.assertEqual(request.call_count, 2)
+            self.assertIn("Line 10", target.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

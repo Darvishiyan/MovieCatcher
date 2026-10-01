@@ -184,13 +184,12 @@ def fetch_english_subtitle(video: Path) -> str:
             except Exception as exc:
                 # HTTP exceptions can contain the query-string API key.
                 logger.warning("SubDL lookup failed for %s (%s)", video, type(exc).__name__)
-        command = [
-            sys.executable, "-m", "subliminal", "download",
-            "-l", "en", "-p", "gestdown", "-p", "bsplayer", "-p", "tvsubtitles",
-            "-r", "hash", "-r", "metadata", "-m", "60", "-F", "srt",
-            "-d", temp, str(video),
-        ]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        providers = ("gestdown", "tvsubtitles") if guessit(video.name).get("type") == "episode" else ("bsplayer",)
+        command = [sys.executable, "-m", "subliminal", "download", "-l", "en"]
+        for provider in providers:
+            command.extend(("-p", provider))
+        command.extend(("-r", "hash", "-r", "metadata", "-m", "60", "-F", "srt", "-d", temp, str(video)))
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not _valid_srt(candidate, duration):
             logger.warning("English subtitle unavailable for %s: %s", video, (result.stderr or result.stdout)[-600:])
             return "unavailable"
