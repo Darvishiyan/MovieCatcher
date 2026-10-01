@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import html
-import json
 import logging
 import mimetypes
 import os
@@ -27,6 +26,8 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
+from dolby_vision import VIDEO_SUFFIXES, DolbyVisionError, remove_dolby_vision
 
 
 class ConfigurationError(RuntimeError):
@@ -62,6 +63,15 @@ def _positive_float(name: str, default: str) -> float:
     return value
 
 
+def _boolean_env(name: str, default: str = "false") -> bool:
+    value = os.getenv(name, default).strip().lower()
+    if value in {"true", "1", "yes", "on"}:
+        return True
+    if value in {"false", "0", "no", "off"}:
+        return False
+    raise ConfigurationError(f"{name} must be true or false")
+
+
 def _id_set(name: str) -> frozenset[int]:
     raw_value = os.getenv(name, "").strip()
     if not raw_value:
@@ -87,6 +97,7 @@ class Settings:
     allowed_user_ids: frozenset[int]
     allowed_chat_ids: frozenset[int]
     log_level: str
+    dolby_vision_remove: bool
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -112,6 +123,7 @@ class Settings:
             allowed_user_ids=allowed_user_ids,
             allowed_chat_ids=allowed_chat_ids,
             log_level=log_level,
+            dolby_vision_remove=_boolean_env("DOLBY_VISION_REMOVE"),
         )
 
 
@@ -164,7 +176,6 @@ SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
 MEDIA_GROUP_SETTLE_SECONDS = 1.0
 PENDING_FILE_DISPLAY_LIMIT = 20
-CONVERTER_VIDEO_SUFFIXES = frozenset({".mkv", ".mp4", ".m4v", ".mov", ".ts", ".webm"})
 PENDING_DOWNLOAD_KEYS = (
     "file_id",
     "file_name",
@@ -178,36 +189,6 @@ PENDING_DOWNLOAD_KEYS = (
     "selection_message_id",
     "state",
 )
-
-
-def _queue_conversion(downloaded_path: Path) -> None:
-    """Persist a completed video for the separately running PC worker."""
-    path = downloaded_path.resolve()
-    if path.suffix.lower() not in CONVERTER_VIDEO_SUFFIXES:
-        return
-    relative_path = path.relative_to(SETTINGS.download_root)
-    queue_dir = SETTINGS.session_dir / "converter" / "queue"
-    queue_dir.mkdir(parents=True, exist_ok=True)
-    job_id = uuid.uuid4().hex
-    record = {
-        "version": 1,
-        "id": job_id,
-        "relative_path": relative_path.as_posix(),
-        "size": path.stat().st_size,
-        "created": time.time(),
-        "profile": "pending",
-    }
-    temporary = queue_dir / f".{job_id}.tmp"
-    ready = queue_dir / f"{job_id}.json"
-    try:
-        with temporary.open("x", encoding="utf-8") as output:
-            json.dump(record, output, ensure_ascii=False)
-            output.flush()
-            os.fsync(output.fileno())
-        os.replace(temporary, ready)
-    finally:
-        temporary.unlink(missing_ok=True)
-    logger.info("Queued for PC converter: %s", relative_path)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -756,17 +737,31 @@ async def _process_queued_download(
         raise RuntimeError("Telegram download client is unavailable")
 
     try:
+        process_video = SETTINGS.dolby_vision_remove and destination.suffix.lower() in VIDEO_SUFFIXES
+        download_target = (
+            destination.with_name(f".moviecatcher-{uuid.uuid4().hex}{destination.suffix}")
+            if process_video else destination
+        )
         downloaded_path = await _download_telegram_media(
             item,
-            destination,
+            download_target,
             status_message,
             client,
         )
         logger.info("Download complete: %s", downloaded_path)
-        try:
-            _queue_conversion(downloaded_path)
-        except Exception:
-            logger.exception("Could not enqueue completed video for PC converter")
+        if process_video:
+            try:
+                await status_message.edit_text(
+                    text=f"🔎 Checking Dolby Vision: <b>{html.escape(item.file_name)}</b>",
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.debug("Processing status update was skipped: %s", exc)
+            removed = await asyncio.to_thread(remove_dolby_vision, downloaded_path)
+            os.link(downloaded_path, destination)
+            downloaded_path.unlink()
+            logger.info("Dolby Vision %s: %s", "removed" if removed else "not present", destination)
+            downloaded_path = destination
     except asyncio.CancelledError:
         raise
     except DownloadCancelled:
@@ -774,6 +769,16 @@ async def _process_queued_download(
         logger.info("Download cancelled: %s", destination)
         await status_message.edit_text(
             text=f"❌ Cancelled: <b>{html.escape(item.file_name)}</b>",
+            parse_mode="HTML",
+        )
+        return
+    except DolbyVisionError as exc:
+        item.state = "failed"
+        logger.exception("Dolby Vision removal failed; hidden download retained")
+        await status_message.edit_text(
+            text=("❌ Download saved, but Dolby Vision removal failed. "
+                  "The original download is retained in a hidden file for recovery.\n\n"
+                  f"{html.escape(str(exc)[:2000])}"),
             parse_mode="HTML",
         )
         return

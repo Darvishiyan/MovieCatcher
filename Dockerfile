@@ -21,7 +21,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:${PATH}"
 
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes ca-certificates \
+    && apt-get install --no-install-recommends --yes ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1000 moviecatcher \
     && useradd --system --uid 1000 --gid moviecatcher --home-dir /app moviecatcher \
@@ -32,6 +32,7 @@ COPY --from=builder /opt/venv /opt/venv
 
 WORKDIR /app
 COPY --chown=moviecatcher:moviecatcher bot.py ./
+COPY --chown=moviecatcher:moviecatcher dolby_vision.py ./
 
 USER moviecatcher
 STOPSIGNAL SIGTERM

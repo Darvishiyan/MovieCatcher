@@ -1,9 +1,9 @@
 import asyncio
-import json
 import os
 import shutil
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -476,12 +476,39 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_bot.actions[:2], ["send", "delete"])
         self.assertEqual(fake_bot.deleted[0]["message_id"], 77)
         self.assertIsNone(item.queue_message_id)
-        queued = list((SESSION_ROOT / "converter" / "queue").glob("*.json"))
-        self.assertEqual(len(queued), 1)
-        record = json.loads(queued[0].read_text(encoding="utf-8"))
-        self.assertEqual(record["relative_path"], "episode.mkv")
-        self.assertEqual(record["size"], len(b"completed video"))
-        self.assertEqual(record["profile"], "pending")
+        self.assertEqual((DOWNLOAD_ROOT / "episode.mkv").read_bytes(), b"completed video")
+
+    async def test_enabled_dolby_vision_removal_publishes_after_processing(self):
+        item = make_job()
+        fake_bot = FakeBot()
+        application = SimpleNamespace(
+            bot=fake_bot,
+            bot_data={"pyrogram_client": SuccessfulClient(), "downloads": {item.job_id: item}},
+        )
+        with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, dolby_vision_remove=True)):
+            with patch.object(bot, "remove_dolby_vision", return_value=True) as remove:
+                await bot._process_queued_download(application, item)
+
+        self.assertEqual(item.state, "completed")
+        self.assertEqual((DOWNLOAD_ROOT / "episode.mkv").read_bytes(), b"completed video")
+        self.assertEqual(len(list(DOWNLOAD_ROOT.glob(".moviecatcher-*"))), 0)
+        remove.assert_called_once()
+        self.assertNotEqual(remove.call_args.args[0], DOWNLOAD_ROOT / "episode.mkv")
+
+    async def test_failed_dolby_vision_removal_does_not_publish_source(self):
+        item = make_job()
+        fake_bot = FakeBot()
+        application = SimpleNamespace(
+            bot=fake_bot,
+            bot_data={"pyrogram_client": SuccessfulClient(), "downloads": {item.job_id: item}},
+        )
+        with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, dolby_vision_remove=True)):
+            with patch.object(bot, "remove_dolby_vision", side_effect=bot.DolbyVisionError("test failure")):
+                await bot._process_queued_download(application, item)
+
+        self.assertEqual(item.state, "failed")
+        self.assertFalse((DOWNLOAD_ROOT / "episode.mkv").exists())
+        self.assertEqual(len(list(DOWNLOAD_ROOT.glob(".moviecatcher-*"))), 1)
 
     async def test_batch_queue_notice_is_deleted_only_once(self):
         first = make_job("first.mkv")
