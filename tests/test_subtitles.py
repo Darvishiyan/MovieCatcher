@@ -1,7 +1,10 @@
 import io
 import json
+import logging
+import os
 import tempfile
 import unittest
+import urllib.error
 import zipfile
 from pathlib import Path
 from unittest.mock import patch
@@ -93,6 +96,35 @@ class SubtitleTests(unittest.TestCase):
                         self.assertEqual(subtitles.fetch_english_subtitle(video), "downloaded")
                         fetch.assert_called_once()
             self.assertTrue(video.with_name("Interstellar.2014.1080p.BluRay.en.srt").exists())
+
+    def test_subdl_429_is_reported_as_pending_without_leaking_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            video = Path(directory) / "Interstellar.2014.1080p.BluRay.mkv"
+            video.write_bytes(b"video")
+            error = urllib.error.HTTPError("https://api.subdl.com/?api_key=secret", 429, "quota", {"Retry-After": "60"}, None)
+            with patch.dict(subtitles.os.environ, {"SUBDL_API_KEY": "secret"}):
+                with patch.object(subtitles, "_probe", return_value={"format": {"duration": "7200"}}):
+                    with patch.object(subtitles.urllib.request, "urlopen", side_effect=error):
+                        with patch.object(subtitles.logger, "warning") as warning:
+                            with patch.object(subtitles.time, "time", return_value=1000):
+                                with patch.object(subtitles, "_next_subdl_download_at", 0):
+                                    self.assertEqual(subtitles.fetch_english_subtitle(video), "rate_limited")
+            self.assertNotIn("secret", str(warning.call_args))
+
+    def test_error_log_is_private_and_persistent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = logging.getLogger()
+            try:
+                path = subtitles.configure_error_log(Path(directory))
+                root.warning("persistent test error")
+                self.assertIn("persistent test error", path.read_text(encoding="utf-8"))
+                if os.name != "nt":
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            finally:
+                for handler in list(root.handlers):
+                    if isinstance(handler, subtitles._PrivateRotatingFileHandler) and handler.baseFilename == str(path):
+                        root.removeHandler(handler)
+                        handler.close()
 
 
 if __name__ == "__main__":

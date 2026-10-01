@@ -28,7 +28,7 @@ from telegram.ext import (
 )
 
 from dolby_vision import VIDEO_SUFFIXES, DolbyVisionError, remove_dolby_vision
-from subtitles import fetch_english_subtitle
+from subtitles import configure_error_log, fetch_english_subtitle
 
 
 class ConfigurationError(RuntimeError):
@@ -175,6 +175,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 SETTINGS.download_root.mkdir(parents=True, exist_ok=True)
 SETTINGS.session_dir.mkdir(parents=True, exist_ok=True)
+configure_error_log(SETTINGS.session_dir)
 
 INVALID_FOLDER_CHARS = frozenset('/\\:*?"<>|')
 MEDIA_GROUP_SETTLE_SECONDS = 1.0
@@ -739,6 +740,7 @@ async def _process_queued_download(
     if client is None:
         raise RuntimeError("Telegram download client is unavailable")
 
+    dolby_removed = False
     try:
         process_video = SETTINGS.dolby_vision_remove and destination.suffix.lower() in VIDEO_SUFFIXES
         download_target = (
@@ -761,6 +763,7 @@ async def _process_queued_download(
             except Exception as exc:
                 logger.debug("Processing status update was skipped: %s", exc)
             removed = await asyncio.to_thread(remove_dolby_vision, downloaded_path)
+            dolby_removed = removed
             os.link(downloaded_path, destination)
             downloaded_path.unlink()
             logger.info("Dolby Vision %s: %s", "removed" if removed else "not present", destination)
@@ -805,7 +808,7 @@ async def _process_queued_download(
             subtitle_status = await asyncio.to_thread(fetch_english_subtitle, downloaded_path)
         except Exception:
             logger.exception("English subtitle lookup failed for %s", downloaded_path)
-            subtitle_status = "unavailable"
+            subtitle_status = "error"
 
     try:
         display_path = _display_path(downloaded_path.resolve())
@@ -813,12 +816,15 @@ async def _process_queued_download(
         display_path = _display_path(current_dir)
     item.state = "completed"
     subtitle_note = {
-        "downloaded": "\nEnglish subtitle: downloaded beside the video.",
-        "external": "\nEnglish subtitle: already beside the video.",
-        "unavailable": "\n⚠️ No reliable English subtitle found. The video is saved unchanged.",
+        "downloaded": "\n✅ English subtitle downloaded and saved beside the video.",
+        "external": "\n✅ English subtitle already exists beside the video.",
+        "rate_limited": "\n⏳ English subtitle pending: SubDL daily limit reached; a later library scan will retry.",
+        "unavailable": "\n⚠️ English subtitle not found or failed validation; a later library scan can retry.",
+        "error": "\n⚠️ English subtitle lookup failed; see the persistent error log.",
     }.get(subtitle_status, "")
+    dolby_note = "\n✅ Dolby Vision removed; HDR10 retained." if dolby_removed else ""
     await status_message.edit_text(
-        text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>{subtitle_note}",
+        text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>{dolby_note}{subtitle_note}",
         parse_mode="HTML",
     )
 

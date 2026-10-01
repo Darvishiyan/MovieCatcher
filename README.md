@@ -65,12 +65,28 @@ title, year or episode, release source, and timing before a sidecar is published
 Neither matching method can guarantee perfect sync; check playback, especially
 for extended or recut editions.
 
+SubDL's free download allowance can run out even while its search API still
+works. MovieCatcher reports that condition as pending, stops a bulk scan, and
+returns exit status `75`. It never reports a subtitle as downloaded unless a
+validated `.en.srt` sidecar was actually saved. Run a later scan after the quota
+resets. The `scripts/retry-subtitles.sh` helper accepts one or more library paths
+inside the container and can be scheduled with cron, for example at 03:15 in
+the server's local timezone after the UTC daily reset.
+
 To scan an existing library with the same policy, run this command inside the
 container (repeat it later to retry files without a match):
 
 ```bash
 docker compose exec moviecatcher python /app/subtitles.py scan "$DOWNLOAD_ROOT"
 ```
+
+The final Telegram download status is edited in place. It reports Dolby Vision
+removal when performed and separately confirms whether an English subtitle was
+saved, already existed, is pending due to a provider limit, or could not be
+validated. Warnings and errors from both the bot and subtitle scans are stored
+in `SESSION_PATH/moviecatcher-errors.log` on the host (up to four files of 5 MB
+each, owner readable only). `docker compose logs moviecatcher` also shows live
+logs. Do not put the personal SubDL key in this public repository.
 
 ## Features
 

@@ -6,12 +6,15 @@ import argparse
 import io
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
 import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
+import urllib.error
 import urllib.request
 import zipfile
 from difflib import SequenceMatcher
@@ -25,6 +28,49 @@ logger = logging.getLogger(__name__)
 _SRT_TIME = re.compile(r"(?m)^\s*(\d{2}):(\d{2}):(\d{2})[,\.]\d{3}\s*-->")
 _SUBDL_API = "https://api.subdl.com/api/v1/subtitles"
 _SUBDL_DOWNLOAD = "https://dl.subdl.com"
+_next_subdl_download_at = 0.0
+
+
+class SubtitleRateLimited(RuntimeError):
+    """The subtitle provider has temporarily exhausted its download quota."""
+
+
+class _PrivateRotatingFileHandler(RotatingFileHandler):
+    def _open(self):
+        descriptor = os.open(self.baseFilename, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        os.chmod(self.baseFilename, 0o600)
+        return os.fdopen(descriptor, "a", encoding=self.encoding or "utf-8")
+
+
+def configure_error_log(directory: Path) -> Path:
+    """Keep warnings and errors across container restarts, with bounded size."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / "moviecatcher-errors.log"
+    root = logging.getLogger()
+    if not any(isinstance(handler, _PrivateRotatingFileHandler) and handler.baseFilename == str(path) for handler in root.handlers):
+        handler = _PrivateRotatingFileHandler(path, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+        handler.setLevel(logging.WARNING)
+        handler.setFormatter(logging.Formatter("%(asctime)s %(name)s %(levelname)s %(message)s"))
+        root.addHandler(handler)
+    return path
+
+
+def _subdl_open(url: str):
+    global _next_subdl_download_at
+    if time.time() < _next_subdl_download_at:
+        raise SubtitleRateLimited("SubDL download quota has not reset")
+    try:
+        return urllib.request.urlopen(url, timeout=20)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 429:
+            raise
+        try:
+            retry_after = max(60, int(exc.headers.get("Retry-After", "3600")))
+        except (TypeError, ValueError):
+            retry_after = 3600
+        _next_subdl_download_at = time.time() + retry_after
+        raise SubtitleRateLimited(f"SubDL download quota reached; retry after {retry_after}s") from None
 
 
 def _probe(video: Path) -> dict:
@@ -98,7 +144,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
     else:
         parameters["type"] = "movie"
     url = f"{_SUBDL_API}?{urllib.parse.urlencode(parameters)}"
-    with urllib.request.urlopen(url, timeout=20) as response:
+    with _subdl_open(url) as response:
         data = json.load(response)
     if not data.get("status"):
         raise RuntimeError(f"SubDL search failed: {data.get('error', 'unknown error')}")
@@ -122,7 +168,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
     for _, subtitle_url, name in sorted(scored, reverse=True)[:3]:
         if not subtitle_url or not subtitle_url.startswith("/subtitle/"):
             continue
-        with urllib.request.urlopen(f"{_SUBDL_DOWNLOAD}{subtitle_url}", timeout=20) as response:
+        with _subdl_open(f"{_SUBDL_DOWNLOAD}{subtitle_url}") as response:
             body = response.read(10_000_001)
         if len(body) > 10_000_000:
             continue
@@ -145,7 +191,7 @@ def _fetch_subdl(video: Path, candidate_path: Path, duration: float | None, api_
 
 
 def fetch_english_subtitle(video: Path) -> str:
-    """Return downloaded, external, or unavailable.
+    """Return downloaded, external, rate_limited, or unavailable.
 
     Only a reasonably matched, readable SRT is published; an unmatched video is
     left untouched for a later retry or manual selection.
@@ -161,6 +207,7 @@ def fetch_english_subtitle(video: Path) -> str:
     with tempfile.TemporaryDirectory(prefix=".moviecatcher-subtitles-", dir=video.parent) as temp:
         candidate = Path(temp) / sidecar.name
         api_key = os.getenv("SUBDL_API_KEY", "").strip()
+        rate_limited = False
         if api_key:
             try:
                 if _fetch_subdl(video, candidate, duration, api_key):
@@ -170,12 +217,15 @@ def fetch_english_subtitle(video: Path) -> str:
                         return "external"
                     logger.info("English subtitle saved from SubDL: %s", sidecar)
                     return "downloaded"
+            except SubtitleRateLimited:
+                rate_limited = True
+                logger.warning("SubDL download quota reached for %s; retry later", video)
             except Exception as exc:
                 # HTTP exceptions can contain the query-string API key.
                 logger.warning("SubDL lookup failed for %s (%s)", video, type(exc).__name__)
         # No unauthenticated movie provider is enabled; movie lookups use SubDL.
         if guessit(video.name).get("type") != "episode":
-            return "unavailable"
+            return "rate_limited" if rate_limited else "unavailable"
         providers = ("gestdown", "tvsubtitles")
         command = [sys.executable, "-m", "subliminal", "download", "-l", "en"]
         for provider in providers:
@@ -184,7 +234,7 @@ def fetch_english_subtitle(video: Path) -> str:
         result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode != 0 or not _valid_srt(candidate, duration):
             logger.warning("English subtitle unavailable for %s: %s", video, (result.stderr or result.stdout)[-600:])
-            return "unavailable"
+            return "rate_limited" if rate_limited else "unavailable"
         try:
             os.link(candidate, sidecar)
         except FileExistsError:
@@ -197,7 +247,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("scan", "one"))
     parser.add_argument("path", type=Path)
+    parser.add_argument("--error-log-dir", type=Path, default=Path(os.getenv("SESSION_DIR", "/data")))
     args = parser.parse_args()
+    configure_error_log(args.error_log_dir)
     paths = (
         sorted(path for path in args.path.rglob("*") if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES and not path.name.startswith("._"))
         if args.action == "scan" else [args.path]
@@ -211,8 +263,10 @@ def main() -> int:
             result = "error"
         counts[result] = counts.get(result, 0) + 1
         print(f"{result}\t{path}", flush=True)
+        if result == "rate_limited" and args.action == "scan":
+            break
     print(f"Summary: {counts}", flush=True)
-    return 0 if counts.get("error", 0) == 0 else 1
+    return 75 if counts.get("rate_limited", 0) else (1 if counts.get("error", 0) else 0)
 
 
 if __name__ == "__main__":

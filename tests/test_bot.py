@@ -494,6 +494,7 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(list(DOWNLOAD_ROOT.glob(".moviecatcher-*"))), 0)
         remove.assert_called_once()
         self.assertNotEqual(remove.call_args.args[0], DOWNLOAD_ROOT / "episode.mkv")
+        self.assertIn("Dolby Vision removed", fake_bot.status_messages[0].edits[-1][0])
 
     async def test_enabled_english_subtitles_run_after_download(self):
         item = make_job()
@@ -506,7 +507,21 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(bot, "fetch_english_subtitle", return_value="downloaded") as fetch:
                 await bot._process_queued_download(application, item)
         fetch.assert_called_once_with(DOWNLOAD_ROOT / "episode.mkv")
-        self.assertIn("English subtitle: downloaded", fake_bot.status_messages[0].edits[-1][0])
+        self.assertIn("English subtitle downloaded", fake_bot.status_messages[0].edits[-1][0])
+
+    async def test_subtitle_rate_limit_does_not_claim_download(self):
+        item = make_job()
+        fake_bot = FakeBot()
+        application = SimpleNamespace(
+            bot=fake_bot,
+            bot_data={"pyrogram_client": SuccessfulClient(), "downloads": {item.job_id: item}},
+        )
+        with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, english_subtitles=True)):
+            with patch.object(bot, "fetch_english_subtitle", return_value="rate_limited"):
+                await bot._process_queued_download(application, item)
+        final = fake_bot.status_messages[0].edits[-1][0]
+        self.assertIn("English subtitle pending", final)
+        self.assertNotIn("English subtitle downloaded", final)
 
     async def test_failed_dolby_vision_removal_does_not_publish_source(self):
         item = make_job()
