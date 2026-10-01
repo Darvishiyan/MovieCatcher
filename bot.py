@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
 import mimetypes
 import os
@@ -19,6 +20,7 @@ asyncio.set_event_loop(asyncio.new_event_loop())
 
 from pyrogram import Client as PyrogramClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -28,7 +30,7 @@ from telegram.ext import (
 )
 
 from dolby_vision import VIDEO_SUFFIXES, DolbyVisionError, remove_dolby_vision
-from subtitles import configure_error_log, fetch_english_subtitle
+from subtitles import _valid_srt, configure_error_log, fetch_english_subtitle
 
 
 class ConfigurationError(RuntimeError):
@@ -193,6 +195,94 @@ PENDING_DOWNLOAD_KEYS = (
     "selection_message_id",
     "state",
 )
+
+
+def _pending_subtitle_path() -> Path:
+    return SETTINGS.session_dir / "subtitle-pending.json"
+
+
+def _load_pending_subtitles() -> list[dict[str, Any]]:
+    try:
+        data = json.loads(_pending_subtitle_path().read_text(encoding="utf-8"))
+        if not isinstance(data, list):
+            raise ValueError("Pending subtitle data must be a list")
+        return data
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError):
+        logger.exception("Could not read pending subtitle records")
+        return []
+
+
+def _save_pending_subtitles(records: list[dict[str, Any]]) -> None:
+    path = _pending_subtitle_path()
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(records, output, ensure_ascii=False)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+async def _remember_pending_subtitle(
+    application: Application, status_message: Any, item: QueuedDownload,
+    video: Path, success_text: str,
+) -> None:
+    message_id = getattr(status_message, "message_id", None)
+    if not isinstance(message_id, int):
+        return
+    lock = application.bot_data.setdefault("subtitle_pending_lock", asyncio.Lock())
+    async with lock:
+        records = _load_pending_subtitles()
+        records.append({
+            "chat_id": item.chat_id,
+            "message_id": message_id,
+            "video_path": str(video),
+            "success_text": success_text,
+        })
+        _save_pending_subtitles(records)
+
+
+async def _refresh_pending_subtitles(application: Application) -> None:
+    lock = application.bot_data.setdefault("subtitle_pending_lock", asyncio.Lock())
+    async with lock:
+        records = _load_pending_subtitles()
+        remaining = []
+        for record in records:
+            video = Path(record["video_path"])
+            sidecar = video.with_name(f"{video.stem}.en.srt")
+            if not _valid_srt(sidecar, None):
+                remaining.append(record)
+                continue
+            try:
+                await application.bot.edit_message_text(
+                    chat_id=record["chat_id"],
+                    message_id=record["message_id"],
+                    text=record["success_text"],
+                    parse_mode="HTML",
+                )
+            except BadRequest as exc:
+                if "Message is not modified" not in str(exc):
+                    logger.warning("Could not update subtitle status for %s (%s)", video, type(exc).__name__)
+                    remaining.append(record)
+            except Exception as exc:
+                logger.warning("Could not update subtitle status for %s (%s)", video, type(exc).__name__)
+                remaining.append(record)
+            else:
+                logger.info("Updated Telegram message after English subtitle arrived: %s", video)
+        if len(remaining) != len(records):
+            _save_pending_subtitles(remaining)
+
+
+async def _pending_subtitle_worker(application: Application) -> None:
+    while True:
+        try:
+            await _refresh_pending_subtitles(application)
+        except Exception:
+            logger.exception("Pending subtitle message update failed")
+        await asyncio.sleep(600)
 
 
 def _is_authorized(update: Update) -> bool:
@@ -827,6 +917,15 @@ async def _process_queued_download(
         text=f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>{dolby_note}{subtitle_note}",
         parse_mode="HTML",
     )
+    if subtitle_status in {"rate_limited", "unavailable", "error"}:
+        success_text = (
+            f"✅ Done!\n\nLocation: <code>{html.escape(display_path)}</code>"
+            f"{dolby_note}\n✅ English subtitle downloaded and saved beside the video."
+        )
+        try:
+            await _remember_pending_subtitle(application, status_message, item, downloaded_path, success_text)
+        except Exception:
+            logger.exception("Could not persist pending subtitle message for %s", downloaded_path)
 
 
 async def _download_worker(application: Application) -> None:
@@ -1099,6 +1198,10 @@ async def main() -> None:
                 _download_worker(application),
                 name="moviecatcher-download-worker",
             )
+            subtitle_task = asyncio.create_task(
+                _pending_subtitle_worker(application),
+                name="moviecatcher-subtitle-status-worker",
+            )
             try:
                 await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
                 updater_started = True
@@ -1108,7 +1211,8 @@ async def main() -> None:
                 if updater_started:
                     await application.updater.stop()
                 worker_task.cancel()
-                await asyncio.gather(worker_task, return_exceptions=True)
+                subtitle_task.cancel()
+                await asyncio.gather(worker_task, subtitle_task, return_exceptions=True)
                 await application.stop()
     finally:
         await pyrogram_client.stop()

@@ -83,7 +83,10 @@ docker compose exec moviecatcher python /app/subtitles.py scan "$DOWNLOAD_ROOT"
 The final Telegram download status is edited in place. It reports Dolby Vision
 removal when performed and separately confirms whether an English subtitle was
 saved, already existed, is pending due to a provider limit, or could not be
-validated. Warnings and errors from both the bot and subtitle scans are stored
+validated. If a scheduled library scan later saves a subtitle for a pending
+download, the bot updates that same Telegram message within ten minutes. Pending
+message records survive a container restart in `SESSION_PATH/subtitle-pending.json`.
+Warnings and errors from both the bot and subtitle scans are stored
 in `SESSION_PATH/moviecatcher-errors.log` on the host (up to four files of 5 MB
 each, owner readable only). `docker compose logs moviecatcher` also shows live
 logs. Do not put the personal SubDL key in this public repository.

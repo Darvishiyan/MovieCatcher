@@ -72,6 +72,7 @@ class FakeQuery:
 class FakeStatusMessage:
     def __init__(self):
         self.edits = []
+        self.message_id = 123
 
     async def edit_text(self, text, **kwargs):
         self.edits.append((text, kwargs))
@@ -516,12 +517,23 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
             bot=fake_bot,
             bot_data={"pyrogram_client": SuccessfulClient(), "downloads": {item.job_id: item}},
         )
-        with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, english_subtitles=True)):
-            with patch.object(bot, "fetch_english_subtitle", return_value="rate_limited"):
-                await bot._process_queued_download(application, item)
-        final = fake_bot.status_messages[0].edits[-1][0]
-        self.assertIn("English subtitle pending", final)
-        self.assertNotIn("English subtitle downloaded", final)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(bot, "SETTINGS", replace(bot.SETTINGS, english_subtitles=True, session_dir=Path(directory))):
+                with patch.object(bot, "fetch_english_subtitle", return_value="rate_limited"):
+                    await bot._process_queued_download(application, item)
+                final = fake_bot.status_messages[0].edits[-1][0]
+                self.assertIn("English subtitle pending", final)
+                self.assertNotIn("English subtitle downloaded", final)
+                self.assertEqual(len(bot._load_pending_subtitles()), 1)
+                sidecar = DOWNLOAD_ROOT / "episode.en.srt"
+                sidecar.write_text("\n\n".join(
+                    f"{number}\n00:{number:02}:00,000 --> 00:{number:02}:02,000\nEnglish line {number}"
+                    for number in range(1, 11)
+                ), encoding="utf-8")
+                await bot._refresh_pending_subtitles(application)
+                self.assertEqual(len(bot._load_pending_subtitles()), 0)
+        self.assertIn("English subtitle downloaded", fake_bot.message_edits[-1]["text"])
+        self.assertEqual(fake_bot.message_edits[-1]["message_id"], 123)
 
     async def test_failed_dolby_vision_removal_does_not_publish_source(self):
         item = make_job()
