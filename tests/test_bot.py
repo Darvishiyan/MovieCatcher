@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import shutil
 import tempfile
@@ -116,6 +117,7 @@ class SuccessfulClient:
     async def download_media(self, file_id, file_name, progress):
         await progress(5 * 1024 * 1024, 10 * 1024 * 1024)
         await progress(10 * 1024 * 1024, 10 * 1024 * 1024)
+        Path(file_name).write_bytes(b"completed video")
         return file_name
 
     def stop_transmission(self):
@@ -474,6 +476,12 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_bot.actions[:2], ["send", "delete"])
         self.assertEqual(fake_bot.deleted[0]["message_id"], 77)
         self.assertIsNone(item.queue_message_id)
+        queued = list((SESSION_ROOT / "converter" / "queue").glob("*.json"))
+        self.assertEqual(len(queued), 1)
+        record = json.loads(queued[0].read_text(encoding="utf-8"))
+        self.assertEqual(record["relative_path"], "episode.mkv")
+        self.assertEqual(record["size"], len(b"completed video"))
+        self.assertEqual(record["profile"], "pending")
 
     async def test_batch_queue_notice_is_deleted_only_once(self):
         first = make_job("first.mkv")

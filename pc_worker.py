@@ -16,6 +16,8 @@ from pathlib import Path
 HOST = os.getenv("MOVIECATCHER_HOST", "homeserver")
 SERVER_SCRIPT = "/opt/moviecatcher/data/converter/server_ops.py"
 WORK = Path(os.getenv("MOVIECATCHER_WORK", str(Path.home() / "MovieCatcherConverter")))
+FFMPEG = os.getenv("MOVIECATCHER_FFMPEG", "ffmpeg")
+FFPROBE = os.getenv("MOVIECATCHER_FFPROBE", "ffprobe")
 SSH_OPTIONS = ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8",
                "-o", "StrictHostKeyChecking=yes", "-o", "ServerAliveInterval=15",
                "-o", "ServerAliveCountMax=3"]
@@ -34,7 +36,7 @@ def remote_json(*arguments: object) -> object:
 
 def ffprobe(path: Path) -> dict:
     result = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
+        [FFPROBE, "-v", "error", "-show_streams", "-show_format", "-of", "json", str(path)],
         capture_output=True, check=True,
     )
     return json.loads(result.stdout.decode("utf-8"))
@@ -73,7 +75,7 @@ def sha256(path: Path) -> str:
 
 def command_for(job: dict, source: Path, output: Path, source_probe: dict) -> list[str]:
     profile = job["profile"]
-    command = ["ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "warning", "-y"]
+    command = [FFMPEG, "-hide_banner", "-nostdin", "-loglevel", "warning", "-y"]
     sample_start = job.get("sample_start")
     sample_seconds = job.get("sample_seconds")
     if sample_start is not None:
