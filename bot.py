@@ -517,6 +517,23 @@ def _pending_files_text(
     )
 
 
+def _folder_name_prompt_text(
+    pending_files: list[PendingFile],
+    current_dir: Path,
+) -> str:
+    return (
+        f"{_pending_files_heading(pending_files)}\n\n"
+        f"📂 <code>{html.escape(_display_path(current_dir))}</code>\n\n"
+        "Type the new folder name:"
+    )
+
+
+def _folder_name_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")]]
+    )
+
+
 async def _present_pending_files(message: Any, context: Any) -> None:
     pending_files: list[PendingFile] = context.user_data.get("pending_files", [])
     if not pending_files:
@@ -549,27 +566,41 @@ async def _refresh_pending_files(message: Any, context: Any) -> None:
 
     pending_files: list[PendingFile] = context.user_data["pending_files"]
     current_dir = Path(context.user_data["current_dir"]).resolve()
-    message_id = context.user_data.get("selection_message_id")
+    waiting_for_folder_name = context.user_data.get("state") == "waiting_folder"
+    message_id = context.user_data.get(
+        "folder_prompt_message_id" if waiting_for_folder_name else "selection_message_id"
+    )
     chat_id = context.user_data.get("selection_chat_id")
+    if waiting_for_folder_name:
+        prompt_text = _folder_name_prompt_text(pending_files, current_dir)
+        prompt_markup = _folder_name_prompt_keyboard()
+    else:
+        prompt_text = _pending_files_text(pending_files, current_dir)
+        prompt_markup = _keyboard(current_dir)
     if message_id is not None and chat_id is not None:
         try:
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=message_id,
-                text=_pending_files_text(pending_files, current_dir),
+                text=prompt_text,
                 parse_mode="HTML",
-                reply_markup=_keyboard(current_dir),
+                reply_markup=prompt_markup,
             )
             return
         except Exception as exc:
             logger.debug("Could not refresh the pending-file prompt: %s", exc)
 
     selection_message = await message.reply_text(
-        _pending_files_text(pending_files, current_dir),
+        prompt_text,
         parse_mode="HTML",
-        reply_markup=_keyboard(current_dir),
+        reply_markup=prompt_markup,
     )
-    context.user_data["selection_message_id"] = selection_message.message_id
+    message_id_key = (
+        "folder_prompt_message_id"
+        if waiting_for_folder_name
+        else "selection_message_id"
+    )
+    context.user_data[message_id_key] = selection_message.message_id
     context.user_data["selection_chat_id"] = getattr(
         selection_message,
         "chat_id",
@@ -632,22 +663,14 @@ async def handle_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     state = context.user_data.get("state")
     active_media_group_id = context.user_data.get("media_group_id")
 
-    if state == "collecting" and (
-        media_group_id is None or active_media_group_id == media_group_id
-    ):
+    if state == "collecting":
         context.user_data["pending_files"].append(pending_file)
         _schedule_media_group_prompt(message, context, active_media_group_id)
         return
 
-    if state == "browsing":
+    if state in {"browsing", "waiting_folder"}:
         context.user_data["pending_files"].append(pending_file)
         await _refresh_pending_files(message, context)
-        return
-
-    if state in {"collecting", "waiting_folder"}:
-        await message.reply_text(
-            "Please finish or cancel the previous folder selection first."
-        )
         return
 
     context.user_data["pending_files"] = [pending_file]
@@ -1047,7 +1070,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             current_dir = current_dir.parent
             context.user_data["current_dir"] = current_dir
         await query.edit_message_text(
-            _directory_text(current_dir),
+            _pending_files_text(context.user_data["pending_files"], current_dir),
             parse_mode="HTML",
             reply_markup=_keyboard(current_dir),
         )
@@ -1068,7 +1091,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         current_dir = subdirectories[index].resolve()
         context.user_data["current_dir"] = current_dir
         await query.edit_message_text(
-            _directory_text(current_dir),
+            _pending_files_text(context.user_data["pending_files"], current_dir),
             parse_mode="HTML",
             reply_markup=_keyboard(current_dir),
         )
@@ -1079,12 +1102,12 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         if query.message is not None:
             context.user_data["folder_prompt_message_id"] = query.message.message_id
         await query.edit_message_text(
-            f"📂 <code>{html.escape(_display_path(current_dir))}</code>\n\n"
-            "Type the new folder name:",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(
-                [[InlineKeyboardButton("❌ Cancel", callback_data="cancel_selection")]]
+            _folder_name_prompt_text(
+                context.user_data["pending_files"],
+                current_dir,
             ),
+            parse_mode="HTML",
+            reply_markup=_folder_name_prompt_keyboard(),
         )
         return
 

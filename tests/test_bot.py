@@ -345,6 +345,66 @@ class MovieCatcherTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("episode-1.mkv", refreshed["text"])
         self.assertIn("episode-2.mkv", refreshed["text"])
 
+    async def test_different_telegram_groups_join_the_same_pending_batch(self):
+        application = FakeApplication()
+        context = make_context(application=application)
+        first_message = FakeMessage(
+            FakeAttachment("file-1", "episode-1.mkv"),
+            media_group_id="album-1",
+        )
+        second_message = FakeMessage(
+            FakeAttachment("file-2", "episode-2.mkv"),
+            media_group_id="album-2",
+        )
+
+        with patch.object(bot, "MEDIA_GROUP_SETTLE_SECONDS", 0.01):
+            await bot.handle_media(make_update(message=first_message), context)
+            await bot.handle_media(make_update(message=second_message), context)
+            await asyncio.sleep(0.03)
+
+        self.assertEqual(context.user_data["state"], "browsing")
+        self.assertEqual(
+            [item.file_name for item in context.user_data["pending_files"]],
+            ["episode-1.mkv", "episode-2.mkv"],
+        )
+        self.assertEqual(len(first_message.replies + second_message.replies), 1)
+        self.assertFalse(
+            any(
+                "finish or cancel" in text.lower()
+                for text, _ in first_message.replies + second_message.replies
+            )
+        )
+
+    async def test_file_joins_batch_while_waiting_for_new_folder_name(self):
+        fake_bot = FakeBot()
+        user_data = {
+            "state": "waiting_folder",
+            "pending_files": [bot.PendingFile("file-1", "episode-1.mkv", 100)],
+            "current_dir": DOWNLOAD_ROOT,
+            "folder_prompt_message_id": 50,
+            "selection_chat_id": 200,
+        }
+        context = make_context(user_data=user_data, telegram_bot=fake_bot)
+        second_message = FakeMessage(FakeAttachment("file-2", "episode-2.mkv"))
+
+        await bot.handle_media(make_update(message=second_message), context)
+
+        self.assertEqual(user_data["state"], "waiting_folder")
+        self.assertEqual(
+            [item.file_name for item in user_data["pending_files"]],
+            ["episode-1.mkv", "episode-2.mkv"],
+        )
+        self.assertEqual(len(second_message.replies), 0)
+        self.assertEqual(len(fake_bot.message_edits), 1)
+        refreshed = fake_bot.message_edits[0]
+        self.assertEqual(refreshed["message_id"], 50)
+        self.assertIn("Received <b>2 files</b>", refreshed["text"])
+        self.assertIn("Type the new folder name:", refreshed["text"])
+        self.assertEqual(
+            refreshed["reply_markup"].inline_keyboard[0][0].callback_data,
+            "cancel_selection",
+        )
+
     async def test_large_loose_batch_keeps_prompt_within_telegram_limit(self):
         pending_files = [
             bot.PendingFile(f"file-{index}", f"episode-{index}-{'x' * 180}.mkv", 100)
